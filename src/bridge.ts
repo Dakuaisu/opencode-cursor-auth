@@ -15,6 +15,16 @@ import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
+// @cursor/sdk's internal logger writes "HH:MM:SS.mmm INFO ..." lines via
+// console.log unconditionally (no config/env to silence it, verified against
+// the esm bundle). Filter exactly those lines, pass everything else through.
+const SDK_LOG_LINE = /^\d{2}:\d{2}:\d{2}\.\d{3} (TRACE|DEBUG|INFO|WARN|ERROR)\s/
+const originalConsoleLog = console.log.bind(console)
+console.log = (...args: unknown[]) => {
+  if (typeof args[0] === "string" && SDK_LOG_LINE.test(args[0])) return
+  originalConsoleLog(...args)
+}
+
 type ContentPart = { type: string; text?: string }
 type OaMessage = {
   role: "system" | "user" | "assistant" | "tool"

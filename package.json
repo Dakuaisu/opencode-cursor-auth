@@ -5,10 +5,30 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist", "README.md"],
+  "files": ["dist", "README.md", "LICENSE"],
+  "author": "Vidit Sharma <vidit19sharma@gmail.com> (https://github.com/vidit19sharma)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vidit19sharma/opencode-cursor-auth.git"
+  },
+  "bugs": {
+    "url": "https://github.com/vidit19sharma/opencode-cursor-auth/issues"
+  },
+  "homepage": "https://github.com/vidit19sharma/opencode-cursor-auth#readme",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "cursor",
+    "cursor-sdk",
+    "ai",
+    "llm",
+    "auth"
+  ],
   "scripts": {
     "build": "tsc",
-    "spike": "bun spike/validate-sdk.ts"
+    "test": "bun spike/e2e-bridge.ts",
+    "spike": "bun spike/validate-sdk.ts",
+    "prepublishOnly": "tsc"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.36"
