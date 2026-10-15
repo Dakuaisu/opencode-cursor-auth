@@ -55,7 +55,11 @@ async function cursorFetch(input: Request | string | URL, init?: RequestInit): P
   if (url.includes("/chat/completions")) {
     const body = JSON.parse(await bodyText(input, init))
     const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
-    return handleChatCompletion(body, pastedApiKey, signal)
+    const scope =
+      new Headers(init?.headers).get("x-opencode-session") ??
+      (input instanceof Request ? input.headers.get("x-opencode-session") : null) ??
+      undefined
+    return handleChatCompletion(body, pastedApiKey, signal, scope)
   }
   if (url.includes("/models")) {
     return Response.json({
@@ -80,6 +84,10 @@ export const CursorAuthPlugin: Plugin = async () => {
         const model = cursor.models[id]
         model.cost = { input: 0, output: 0, cache_read: 0, cache_write: 0 }
       }
+    },
+
+    "chat.headers": async (input, output) => {
+      if (input.model.providerID === "cursor") output.headers["x-opencode-session"] = input.sessionID
     },
 
     auth: {

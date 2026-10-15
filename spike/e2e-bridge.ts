@@ -159,5 +159,43 @@ console.log("status:", res10.status, "| body:", (await res10.text()).slice(0, 16
 if (res10.status === 200) console.log("(Cursor accepted the bogus model; skipping assertion)");
 else if (res10.status !== 400) throw new Error("Test 7b FAILED: expected 400 for unknown model");
 
+// --- Test 8: scoped sessions do not collide ---
+console.log("\n=== Test 8: scoped sessions do not collide ===");
+const scopes = ["ses_test_A", "ses_test_B"];
+const messages8 = [
+  { role: "system", content: "You are a terse bot. Reply with exactly the single word PING and nothing else." },
+  { role: "user", content: "Say the word." },
+];
+const before8 = new Set(_stats().agentIds);
+const turn1 = await Promise.all(
+  scopes.map((s) => handleChatCompletion({ model: "gpt-5.5", messages: messages8 as never, stream: true }, undefined, undefined, s).then(readSse)),
+);
+console.log("turn 1 replies:", JSON.stringify(turn1.map((o) => o.content)));
+const after8 = _stats().agentIds;
+const new8 = after8.filter((id) => !before8.has(id));
+console.log("new agentIds:", JSON.stringify(new8));
+if (new8.length !== 2)
+  throw new Error(`Test 8 FAILED: expected 2 new session agents, got ${new8.length} (without scoping identical replies collapse both into one entry)`);
+const turn2 = await Promise.all(
+  scopes.map((s, i) =>
+    handleChatCompletion(
+      {
+        model: "gpt-5.5",
+        messages: [...messages8, { role: "assistant", content: turn1[i].content }, { role: "user", content: "Say it once more." }] as never,
+        stream: true,
+      },
+      undefined,
+      undefined,
+      s,
+    ).then(readSse),
+  ),
+);
+console.log("turn 2 replies:", JSON.stringify(turn2.map((o) => o.content)));
+if (turn2.some((o) => !o.content)) throw new Error("Test 8 FAILED: empty turn 2 reply");
+const final8 = new Set(_stats().agentIds);
+if (final8.size !== before8.size + 2 || !new8.every((id) => final8.has(id)))
+  throw new Error(`Test 8 FAILED: expected both scopes to resume their own agent, got ${JSON.stringify([...final8])}`);
+console.log("stats:", JSON.stringify(_stats()));
+
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);

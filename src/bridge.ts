@@ -236,6 +236,7 @@ type Held = {
   cwd: string
   run: Run | null
   messages: OaMessage[]
+  scope?: string
   textAcc: string
   sink: Sink | null
   // reply is settled on the first delta (streaming) or on finish/fail, so a
@@ -279,8 +280,11 @@ function releaseCwd(cwd: string) {
   rmSync(cwd, { recursive: true, force: true })
 }
 
-function hashMessages(messages: OaMessage[]): string {
-  const norm = messages.map((m) => [m.role, textOf(m.content), m.tool_call_id ?? "", JSON.stringify(m.tool_calls ?? null)])
+// scope (opencode session id) is folded in so identical histories from
+// different sessions (e.g. parallel sub-agents) never share a Cursor agent
+function hashMessages(messages: OaMessage[], scope?: string): string {
+  const norm: unknown[] = messages.map((m) => [m.role, textOf(m.content), m.tool_call_id ?? "", JSON.stringify(m.tool_calls ?? null)])
+  if (scope) norm.unshift(["scope", scope])
   return createHash("sha256").update(JSON.stringify(norm)).digest("hex")
 }
 
@@ -356,7 +360,7 @@ function rememberSession(held: Held, toolCalls: ToolCallOut[]) {
       ? { tool_calls: toolCalls.map((c) => ({ id: c.id, function: { name: c.name, arguments: c.argumentsJson } })) }
       : {}),
   }
-  const key = hashMessages(held.messages.concat(assistant))
+  const key = hashMessages(held.messages.concat(assistant), held.scope)
   const entry = {
     agentId: held.agent.agentId,
     cwd: held.cwd,
@@ -512,10 +516,15 @@ export function _resetForTest() {
 }
 
 export function _stats() {
-  return { held: heldByAgent.size, sessions: sessions.size, disk: diskSessions.size }
+  return {
+    held: heldByAgent.size,
+    sessions: sessions.size,
+    disk: diskSessions.size,
+    agentIds: [...sessions.values()].map((v) => v.agentId).sort(),
+  }
 }
 
-export async function handleChatCompletion(body: OaBody, apiKey?: string, signal?: AbortSignal): Promise<Response> {
+export async function handleChatCompletion(body: OaBody, apiKey?: string, signal?: AbortSignal, scope?: string): Promise<Response> {
   if (signal?.aborted) throw new DOMException("aborted", "AbortError")
   await loadSessions()
   const streaming = body.stream !== false
@@ -557,7 +566,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
 
   // new turn: reuse the agent whose last-seen conversation matches our prefix
   const prefix = body.messages.slice(0, -1)
-  const key = hashMessages(prefix)
+  const key = hashMessages(prefix, scope)
   const entry = sessions.get(key) ?? diskSessions.get(key)
   let agent: SDKAgent | undefined
   let cwd: string | undefined
@@ -594,6 +603,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     cwd: cwd!,
     run: null,
     messages: body.messages,
+    scope,
     textAcc: "",
     sink: null,
     reply,
