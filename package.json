@@ -1,0 +1,28 @@
+{
+  "name": "opencode-cursor-auth",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that uses your Cursor subscription via the official @cursor/sdk — no proxy server, no separate login.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "scripts": {
+    "build": "tsc",
+    "spike": "bun spike/validate-sdk.ts"
+  },
+  "dependencies": {
+    "@cursor/sdk": "^1.0.36"
+  },
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "latest",
+    "@types/node": "^26.6.5",
+    "typescript": "^5.7.0"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "license": "MIT"
+}
