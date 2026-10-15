@@ -50,7 +50,13 @@ function textOf(content: OaMessage["content"]): string {
 }
 
 type ToolCallOut = { id: string; name: string; argumentsJson: string }
-type Usage = { prompt_tokens: number; completion_tokens: number; total_tokens: number }
+type Usage = {
+  prompt_tokens: number
+  completion_tokens: number
+  total_tokens: number
+  prompt_tokens_details?: { cached_tokens: number }
+  completion_tokens_details?: { reasoning_tokens: number }
+}
 
 type Sink = {
   text(t: string): void
@@ -297,11 +303,19 @@ async function syncAgentsMd(cwd: string, messages: OaMessage[]) {
   else if (existsSync(path)) rmSync(path)
 }
 
-function mapUsage(u?: { inputTokens?: number; outputTokens?: number }): Usage | undefined {
+function mapUsage(u?: {
+  inputTokens?: number
+  outputTokens?: number
+  cacheReadTokens?: number
+  reasoningTokens?: number
+}): Usage | undefined {
   if (!u) return undefined
   const prompt = u.inputTokens ?? 0
   const completion = u.outputTokens ?? 0
-  return { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion }
+  const usage: Usage = { prompt_tokens: prompt, completion_tokens: completion, total_tokens: prompt + completion }
+  if (u.cacheReadTokens) usage.prompt_tokens_details = { cached_tokens: u.cacheReadTokens }
+  if (u.reasoningTokens) usage.completion_tokens_details = { reasoning_tokens: u.reasoningTokens }
+  return usage
 }
 
 // deltas arriving between tool flush and the continuation request get buffered
