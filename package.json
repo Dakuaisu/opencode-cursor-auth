@@ -1,6 +1,6 @@
 {
   "name": "@vidit19sharma/opencode-cursor-auth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "OpenCode plugin that uses your Cursor subscription via the official @cursor/sdk \u2014 no proxy server, no separate login.",
   "type": "module",
   "main": "dist/index.js",
@@ -8,6 +8,7 @@
   "files": [
     "dist",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE"
   ],
   "author": "Vidit Sharma <vidit19sharma@gmail.com> (https://github.com/vidit19sharma)",
