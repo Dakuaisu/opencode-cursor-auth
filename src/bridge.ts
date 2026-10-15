@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
-import { resolveModel } from "./models.js"
+import { markBlocked, resolveModel } from "./models.js"
 
 // @cursor/sdk's internal logger writes "HH:MM:SS.mmm INFO ..." lines via
 // console.log unconditionally (no config/env to silence it, verified against
@@ -77,6 +77,7 @@ function statusFor(err: unknown): number {
   const code = typeof e.code === "string" ? e.code : ""
   if (err instanceof AuthenticationError || e.status === 401 || code === "unauthenticated" || /invalid user api key/i.test(msg)) return 401
   if (err instanceof RateLimitError || e.status === 429 || code === "resource_exhausted" || /rate limit/i.test(msg)) return 429
+  if (code === "permission_denied" || /model blocked|permission denied|forbidden/i.test(msg)) return 403
   if (err instanceof ConfigurationError || code === "invalid_argument" || code === "not_found" || /cannot use this model|unknown model/i.test(msg)) return 400
   return 502
 }
@@ -84,6 +85,7 @@ function statusFor(err: unknown): number {
 const ERROR_TYPE: Record<number, string> = {
   400: "invalid_request_error",
   401: "authentication_error",
+  403: "permission_error",
   429: "rate_limit_error",
 }
 
@@ -105,7 +107,7 @@ export function isTransient(err: unknown): boolean {
   if (e.name === "AbortError") return false
   const status = statusFor(err)
   if (status === 429) return true
-  if (status === 400 || status === 401 || e.status === 403 || e.status === 404) return false
+  if (status === 400 || status === 401 || status === 403 || e.status === 404) return false
   if (err instanceof NetworkError || (typeof e.status === "number" && e.status >= 500)) return true
   return /unavailable|deadline_exceeded|ECONNRESET|ETIMEDOUT|fetch failed/i.test(`${e.code ?? ""} ${e.message ?? ""}`)
 }
@@ -306,6 +308,7 @@ function deferred(): Deferred {
 type Held = {
   agent: SDKAgent
   cwd: string
+  model: string
   run: Run | null
   messages: OaMessage[]
   scope?: string
@@ -521,6 +524,7 @@ function teardownHeld(held: Held) {
 
 function failHeld(held: Held, err: unknown) {
   teardownHeld(held)
+  if (statusFor(err) === 403) markBlocked(held.model)
   if (held.response && !held.opened) {
     held.opened = true
     held.reply.resolve(errorResponse(err))
@@ -683,6 +687,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
   held = {
     agent,
     cwd: cwd!,
+    model: body.model,
     run: null,
     messages: body.messages,
     scope,
@@ -734,11 +739,12 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     run = await withRetry(() => agent.send(prompt, {
       onDelta: ({ update }: { update: { type: string; text?: string; usage?: { inputTokens?: number; outputTokens?: number } } }) => {
         if (self.done) return
-        openReply(self)
         if (update.type === "text-delta" && update.text) {
+          openReply(self)
           self.textAcc += update.text
           emit(self, "text", update.text)
         } else if (update.type === "thinking-delta" && update.text) {
+          openReply(self)
           emit(self, "reasoning", update.text)
         } else if (update.type === "turn-ended") {
           self.usage = mapUsage(update.usage)

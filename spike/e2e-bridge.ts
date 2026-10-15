@@ -4,7 +4,7 @@
  * follow-up request with tool result -> final answer on the SAME cursor run).
  */
 import { _resetForTest, _setMaxActive, _stats, handleChatCompletion, isTransient, withRetry } from "../src/bridge.js";
-import { resolveModel } from "../src/models.js";
+import { currentModels, resolveModel } from "../src/models.js";
 import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -292,6 +292,24 @@ const err12c = await withRetry(async () => { calls12c++; return "x"; }, ac12.sig
 if (err12c?.name !== "AbortError" || calls12c !== 0) throw new Error(`Test 12 FAILED: aborted -> ${err12c} after ${calls12c}`);
 if (!isTransient(new Error("fetch failed")) || isTransient({ status: 400 })) throw new Error("Test 12 FAILED: isTransient");
 console.log("429 x2 -> ok after", calls12, "calls | 401 ->", calls12b, "call | aborted ->", calls12c, "calls");
+
+// --- Test 13: blocked model -> 403 and hidden from the list ---
+console.log("\n=== Test 13: blocked model ===");
+const blockedId = "claude-fable-5-1";
+const res13 = await handleChatCompletion({ model: blockedId, messages: [{ role: "user", content: "Reply with exactly: FABLE-OK" }] as never, stream: true }, undefined, undefined, "ses_blocked");
+if (res13.status === 200) {
+  await res13.text();
+  console.log("(this account can use", blockedId, "- skipping blocked-model assertions)");
+} else {
+  const body13 = await res13.json();
+  console.log("status:", res13.status, "| body:", JSON.stringify(body13));
+  if (res13.status !== 403 || body13?.error?.type !== "permission_error" || !/blocked/i.test(body13?.error?.message ?? "")) throw new Error("Test 13 FAILED: expected 403 permission_error mentioning blocked");
+  const listed = Object.keys(await currentModels());
+  const leaked = listed.filter((id) => id === blockedId || id.startsWith(blockedId + "-"));
+  console.log("listed ids for", blockedId, "after block:", leaked.length, "| still resolvable:", !!resolveModel(blockedId));
+  if (leaked.length) throw new Error(`Test 13 FAILED: blocked model still listed: ${leaked.slice(0, 3)}`);
+  if (!resolveModel(blockedId)) throw new Error("Test 13 FAILED: blocked model must still resolve for explicit use");
+}
 
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);

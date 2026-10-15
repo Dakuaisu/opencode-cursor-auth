@@ -7,10 +7,16 @@ const CACHE_DIR = join(homedir(), ".cache", "opencode-cursor-auth")
 const MODELS_CACHE_PATH = join(CACHE_DIR, "models.json")
 const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
-export type ModelInfo = { name: string; context?: number; base?: string; params?: ModelParameterValue[] }
+export type ModelInfo = { name: string; context?: number; base?: string; params?: ModelParameterValue[]; blocked?: true }
 type ModelsCache = { version: 3; fetchedAt: number; models: Record<string, ModelInfo> }
 
 let catalog: Record<string, ModelInfo> = {}
+let fetchedAt = 0
+
+function saveCatalog() {
+  mkdirSync(CACHE_DIR, { recursive: true })
+  writeFileSync(MODELS_CACHE_PATH, JSON.stringify({ version: 3, fetchedAt, models: catalog } satisfies ModelsCache))
+}
 
 function contextValue(raw?: string): number | undefined {
   const match = raw?.trim().match(/^(\d+)([km]?)$/i)
@@ -59,22 +65,52 @@ function loadCachedModels(): ModelsCache | undefined {
 
 // Live model list from Cursor, cached 24h to keep opencode startup fast.
 // Offline/logged-out: stale cache if present, else just "auto" (Cursor's universal alias).
+// Models Cursor has rejected with "Model Blocked" for this account are hidden
+// until the next catalog refresh (the catalog itself carries no entitlement info).
 export async function currentModels(): Promise<Record<string, ModelInfo>> {
   const cached = loadCachedModels()
-  if (cached && Date.now() - cached.fetchedAt <= MODELS_CACHE_TTL_MS) return (catalog = cached.models)
-  try {
-    const models = buildCatalog(await Cursor.models.list())
-    mkdirSync(CACHE_DIR, { recursive: true })
-    writeFileSync(MODELS_CACHE_PATH, JSON.stringify({ version: 3, fetchedAt: Date.now(), models } satisfies ModelsCache))
-    return (catalog = models)
-  } catch {
-    return (catalog = cached?.models ?? { auto: { name: "Auto" } })
+  if (cached && Date.now() - cached.fetchedAt <= MODELS_CACHE_TTL_MS) {
+    catalog = cached.models
+    fetchedAt = cached.fetchedAt
+  } else {
+    try {
+      catalog = buildCatalog(await Cursor.models.list())
+      fetchedAt = Date.now()
+      saveCatalog()
+    } catch {
+      catalog = cached?.models ?? { auto: { name: "Auto" } }
+      fetchedAt = cached?.fetchedAt ?? 0
+    }
   }
+  return Object.fromEntries(Object.entries(catalog).filter(([, m]) => !m.blocked))
+}
+
+function loadCatalog() {
+  if (Object.keys(catalog).length) return
+  const cached = loadCachedModels()
+  catalog = cached?.models ?? {}
+  fetchedAt = cached?.fetchedAt ?? 0
 }
 
 export function resolveModel(opencodeId: string): ModelSelection | undefined {
-  if (!Object.keys(catalog).length) catalog = loadCachedModels()?.models ?? {}
+  loadCatalog()
   const m = catalog[opencodeId]
   if (!m) return undefined
   return m.base && m.params ? { id: m.base, params: m.params } : { id: opencodeId }
+}
+
+export function markBlocked(opencodeId: string) {
+  loadCatalog()
+  const base = catalog[opencodeId]?.base ?? opencodeId
+  let changed = false
+  for (const [id, m] of Object.entries(catalog)) {
+    if ((id === base || m.base === base) && !m.blocked) m.blocked = changed = true
+  }
+  if (changed) {
+    try {
+      saveCatalog()
+    } catch {
+      // cache dir unwritable — the in-memory flag still hides it for this process
+    }
+  }
 }
