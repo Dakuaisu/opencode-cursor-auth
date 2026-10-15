@@ -197,5 +197,33 @@ if (final8.size !== before8.size + 2 || !new8.every((id) => final8.has(id)))
   throw new Error(`Test 8 FAILED: expected both scopes to resume their own agent, got ${JSON.stringify([...final8])}`);
 console.log("stats:", JSON.stringify(_stats()));
 
+// --- Test 9: model limits + key check (no network beyond the cached catalog) ---
+console.log("\n=== Test 9: model limits + key check ===");
+const { CursorAuthPlugin, parseContext, keyProblem } = await import("../src/index.js");
+const item = (value?: string) => ({ id: "m", displayName: "M", parameters: value ? [{ id: "context", values: [{ value }] }] : [] });
+const ctxCases: [string | undefined, number | undefined][] = [["272k", 272000], ["1m", 1000000], ["200K", 200000], [undefined, undefined]];
+for (const [input, expected] of ctxCases) {
+  const got = parseContext(item(input));
+  if (got !== expected) throw new Error(`Test 9 FAILED: parseContext(${input}) = ${got}, expected ${expected}`);
+}
+const now = Date.now();
+const missing = keyProblem({ status: "logged-out" }, now);
+const expired = keyProblem({ status: "logged-in", backendUrl: "x", apiKeyExpiresAtMs: now - 1 }, now);
+const valid = keyProblem({ status: "logged-in", backendUrl: "x", apiKeyExpiresAtMs: now + 1e9 }, now);
+if (!missing?.includes("missing")) throw new Error(`Test 9 FAILED: logged-out -> ${missing}`);
+if (!expired?.includes("expired")) throw new Error(`Test 9 FAILED: expired -> ${expired}`);
+if (valid !== undefined) throw new Error(`Test 9 FAILED: valid key -> ${valid}`);
+console.log("keyProblem(missing):", missing);
+console.log("keyProblem(expired):", expired);
+const hooks = await CursorAuthPlugin({} as never);
+const cfg: Record<string, unknown> = {};
+await hooks.config!(cfg as never);
+const models9 = (cfg as { provider: { cursor: { models: Record<string, { limit?: { context: number; output: number } }> } } }).provider.cursor.models;
+const gpt = models9["gpt-5.5"]?.limit;
+const auto = models9["auto"]?.limit;
+console.log("gpt-5.5 limit:", JSON.stringify(gpt), "| auto limit:", JSON.stringify(auto), "| models:", Object.keys(models9).length);
+if (gpt?.context !== 272000 || gpt?.output !== 32000) throw new Error(`Test 9 FAILED: gpt-5.5 limit ${JSON.stringify(gpt)}`);
+if (!(typeof auto?.context === "number" && auto.context > 0)) throw new Error(`Test 9 FAILED: auto limit ${JSON.stringify(auto)}`);
+
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);

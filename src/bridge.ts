@@ -97,7 +97,7 @@ function errorBody(err: unknown, status = statusFor(err)): ErrorBody {
   }
 }
 
-function errorResponse(err: unknown, status = statusFor(err)): Response {
+export function errorResponse(err: unknown, status = statusFor(err)): Response {
   return Response.json(errorBody(err, status), { status })
 }
 
