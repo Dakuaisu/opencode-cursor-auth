@@ -74,7 +74,7 @@ opencode models | grep cursor/
 - The full catalog is currently about 485 ids from 47 models.
 - **Limits**: `limit.context` is the variant's context value, else the model's first listed context value, else 200k. `limit.output` is a fixed 32k accounting reserve (Cursor publishes no output cap and the bridge sends no `max_tokens`). Limits you set yourself in opencode config are kept.
 - **Unknown ids** are passed through to Cursor, which answers with its own 400.
-- **Blocked models**: Cursor's catalog has no per-account entitlement info. If Cursor rejects a model as "Model Blocked" (e.g. a team admin disabled it), the request fails with 403 `permission_error` carrying Cursor's message, and that model and all its variants are hidden from the list until the next 24h catalog refresh. Using a hidden id explicitly still sends it to Cursor.
+- **Blocked models**: Cursor's catalog has no per-account entitlement info. If Cursor rejects a model as "Model Blocked" (e.g. a team admin disabled it), the request fails with 403 `permission_error` carrying Cursor's message, and that model and all its variants are hidden from the list. Using a hidden id explicitly still sends it to Cursor. Blocked flags persist across catalog refreshes; delete `~/.cache/opencode-cursor-auth/models.json` to re-check.
 - **Offline / logged out**: the stale cache is used if present, otherwise only `cursor/auto`.
 
 The catalog is cached at `~/.cache/opencode-cursor-auth/models.json`; delete it to force a refresh.

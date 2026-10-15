@@ -66,7 +66,7 @@ function loadCachedModels(): ModelsCache | undefined {
 // Live model list from Cursor, cached 24h to keep opencode startup fast.
 // Offline/logged-out: stale cache if present, else just "auto" (Cursor's universal alias).
 // Models Cursor has rejected with "Model Blocked" for this account are hidden
-// until the next catalog refresh (the catalog itself carries no entitlement info).
+// until the cache file is deleted (the catalog itself carries no entitlement info).
 export async function currentModels(): Promise<Record<string, ModelInfo>> {
   const cached = loadCachedModels()
   if (cached && Date.now() - cached.fetchedAt <= MODELS_CACHE_TTL_MS) {
@@ -75,6 +75,7 @@ export async function currentModels(): Promise<Record<string, ModelInfo>> {
   } else {
     try {
       catalog = buildCatalog(await Cursor.models.list())
+      for (const [id, m] of Object.entries(cached?.models ?? {})) if (m.blocked && catalog[id]) catalog[id].blocked = true
       fetchedAt = Date.now()
       saveCatalog()
     } catch {
