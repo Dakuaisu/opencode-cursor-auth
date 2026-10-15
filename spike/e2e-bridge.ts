@@ -3,7 +3,7 @@
  * Test 1: plain streaming chat. Test 2: tool loop (request -> tool_calls ->
  * follow-up request with tool result -> final answer on the SAME cursor run).
  */
-import { _resetForTest, handleChatCompletion } from "../src/bridge.js";
+import { _resetForTest, _stats, handleChatCompletion } from "../src/bridge.js";
 
 async function readSse(res: Response): Promise<{ content: string; reasoning: string; toolCalls: { id: string; name: string; args: string }[]; finish: string | null }> {
   const text = await res.text();
@@ -103,6 +103,61 @@ const res6 = await handleChatCompletion({ model: "gpt-5.5", messages: messages2 
 const out6 = await readSse(res6);
 console.log("turn 4 content:", JSON.stringify(out6.content), "| finish:", out6.finish);
 if (!out6.content.includes("7741")) throw new Error("Test 5 FAILED: disk-resumed agent lost context");
+
+// --- Test 6: abort mid-stream tears down run + agent process ---
+console.log("\n=== Test 6: abort mid-stream ===");
+const ac = new AbortController();
+const res7 = await handleChatCompletion(
+  { model: "gpt-5.5", messages: [{ role: "user", content: "Count from 1 to 400, one number per line." }] as never, stream: true },
+  undefined,
+  ac.signal,
+);
+const reader = res7.body!.getReader();
+const dec = new TextDecoder();
+let aborted = false;
+let chunks = 0;
+const t0 = Date.now();
+const drained = (async () => {
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    chunks++;
+    if (!aborted && dec.decode(value).includes('"content":"') && !dec.decode(value).includes('"content":""')) {
+      aborted = true;
+      ac.abort();
+    }
+  }
+})();
+await Promise.race([drained, new Promise((_, rej) => setTimeout(() => rej(new Error("Test 6 FAILED: stream did not end within 5s")), 5000))]);
+console.log("stream ended after", Date.now() - t0, "ms |", chunks, "chunks | aborted:", aborted);
+if (!aborted) throw new Error("Test 6 FAILED: never saw a content delta");
+await new Promise((r) => setTimeout(r, 1500));
+const stats = _stats();
+console.log("stats:", JSON.stringify(stats));
+if (stats.held !== 0) throw new Error("Test 6 FAILED: held run leaked");
+const procs = new TextDecoder()
+  .decode(Bun.spawnSync(["pgrep", "-fl", "cursor-agent"]).stdout)
+  .split("\n")
+  .filter((l) => l && !l.includes("worker-server"));
+console.log("cursor-agent procs (non worker-server):", procs.length ? procs : "none");
+if (procs.length) throw new Error("Test 6 FAILED: stray cursor-agent process after abort");
+const res8 = await handleChatCompletion({ model: "gpt-5.5", messages: messages1 as never, stream: true });
+const out8 = await readSse(res8);
+console.log("post-abort content:", JSON.stringify(out8.content), "| finish:", out8.finish);
+if (!out8.content.includes("BRIDGE-OK")) throw new Error("Test 6 FAILED: bridge unusable after abort");
+
+// --- Test 7: auth error -> real HTTP status ---
+console.log("\n=== Test 7: auth error status ===");
+const res9 = await handleChatCompletion({ model: "gpt-5.5", messages: messages1 as never, stream: true }, "crsr_definitely_invalid_key");
+const body9 = await res9.json();
+console.log("status:", res9.status, "| body:", JSON.stringify(body9));
+if (res9.status !== 401 || !body9?.error?.message) throw new Error("Test 7 FAILED: expected 401 with error.message");
+
+console.log("\n=== Test 7b: bogus model ===");
+const res10 = await handleChatCompletion({ model: "definitely-not-a-model", messages: messages1 as never, stream: true });
+console.log("status:", res10.status, "| body:", (await res10.text()).slice(0, 160));
+if (res10.status === 200) console.log("(Cursor accepted the bogus model; skipping assertion)");
+else if (res10.status !== 400) throw new Error("Test 7b FAILED: expected 400 for unknown model");
 
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);

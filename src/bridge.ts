@@ -8,7 +8,7 @@
  * next HTTP request (role:"tool" messages) resolves the parked promises and
  * the SAME run continues — one metered Cursor run per opencode tool loop.
  */
-import { Agent, type SDKAgent, type Run } from "@cursor/sdk"
+import { Agent, AuthenticationError, ConfigurationError, RateLimitError, type SDKAgent, type Run } from "@cursor/sdk"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
@@ -63,7 +63,42 @@ type Sink = {
   reasoning(t: string): void
   toolCalls(calls: ToolCallOut[]): void
   finish(reason: "stop" | "tool_calls", usage?: Usage): void
+  /** Post-first-byte failure: error frame, then close WITHOUT [DONE]. */
   fail(err: unknown): void
+  close(): void
+}
+
+type ErrorBody = { error: { message: string; type: string; code?: string } }
+
+function statusFor(err: unknown): number {
+  const e = (typeof err === "object" && err !== null ? err : {}) as { message?: unknown; code?: unknown; status?: unknown }
+  const msg = String(e.message ?? err ?? "")
+  const code = typeof e.code === "string" ? e.code : ""
+  if (err instanceof AuthenticationError || e.status === 401 || code === "unauthenticated" || /invalid user api key/i.test(msg)) return 401
+  if (err instanceof RateLimitError || e.status === 429 || code === "resource_exhausted" || /rate limit/i.test(msg)) return 429
+  if (err instanceof ConfigurationError || code === "invalid_argument" || code === "not_found" || /cannot use this model|unknown model/i.test(msg)) return 400
+  return 502
+}
+
+const ERROR_TYPE: Record<number, string> = {
+  400: "invalid_request_error",
+  401: "authentication_error",
+  429: "rate_limit_error",
+}
+
+function errorBody(err: unknown, status = statusFor(err)): ErrorBody {
+  const e = (typeof err === "object" && err !== null ? err : {}) as { message?: unknown; code?: unknown }
+  return {
+    error: {
+      message: String(e.message ?? err ?? "unknown error"),
+      type: ERROR_TYPE[status] ?? "api_error",
+      ...(typeof e.code === "string" ? { code: e.code } : {}),
+    },
+  }
+}
+
+function errorResponse(err: unknown, status = statusFor(err)): Response {
+  return Response.json(errorBody(err, status), { status })
 }
 
 function chunk(id: string, model: string, delta: Record<string, unknown>, finish: string | null, usage?: Usage) {
@@ -77,7 +112,7 @@ function chunk(id: string, model: string, delta: Record<string, unknown>, finish
   }
 }
 
-function sseResponse(model: string): { response: Response; sink: Sink } {
+function sseResponse(model: string, onCancel: () => void): { response: Response; sink: Sink } {
   const id = `chatcmpl-${randomUUID()}`
   const enc = new TextEncoder()
   let controller!: ReadableStreamDefaultController<Uint8Array>
@@ -89,17 +124,25 @@ function sseResponse(model: string): { response: Response; sink: Sink } {
     },
     cancel() {
       closed = true
+      onCancel()
     },
   })
-  function send(delta: Record<string, unknown>, finish: string | null = null, usage?: Usage) {
+  function frame(payload: unknown) {
     if (closed) return
-    controller.enqueue(enc.encode(`data: ${JSON.stringify(chunk(id, model, delta, finish, usage))}\n\n`))
+    controller.enqueue(enc.encode(`data: ${JSON.stringify(payload)}\n\n`))
+  }
+  function send(delta: Record<string, unknown>, finish: string | null = null, usage?: Usage) {
+    frame(chunk(id, model, delta, finish, usage))
+  }
+  function close() {
+    if (closed) return
+    closed = true
+    try { controller.close() } catch {}
   }
   function end() {
     if (closed) return
     controller.enqueue(enc.encode("data: [DONE]\n\n"))
-    controller.close()
-    closed = true
+    close()
   }
   const sink: Sink = {
     text: (t) => send({ content: t }),
@@ -118,10 +161,10 @@ function sseResponse(model: string): { response: Response; sink: Sink } {
       end()
     },
     fail: (err) => {
-      send({ content: `\n\n[cursor error] ${err instanceof Error ? err.message : String(err)}` })
-      send({}, "stop")
-      end()
+      frame(errorBody(err))
+      close()
     },
+    close,
   }
   return {
     response: new Response(stream, {
@@ -132,13 +175,11 @@ function sseResponse(model: string): { response: Response; sink: Sink } {
   }
 }
 
-function jsonCollector(model: string): { promise: Promise<Response>; sink: Sink } {
+function jsonCollector(model: string, resolve: (r: Response) => void): Sink {
   const id = `chatcmpl-${randomUUID()}`
   let content = ""
   let calls: ToolCallOut[] = []
-  let resolve!: (r: Response) => void
-  const promise = new Promise<Response>((r) => (resolve = r))
-  const sink: Sink = {
+  return {
     text: (t) => (content += t),
     reasoning: () => {},
     toolCalls: (c) => (calls = calls.concat(c)),
@@ -171,26 +212,38 @@ function jsonCollector(model: string): { promise: Promise<Response>; sink: Sink 
           usage: usage ?? { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
         }),
       ),
-    fail: (err) =>
-      resolve(
-        Response.json(
-          { error: { message: err instanceof Error ? err.message : String(err), type: "cursor_error" } },
-          { status: 500 },
-        ),
-      ),
+    fail: (err) => resolve(errorResponse(err)),
+    close: () => {},
   }
-  return { promise, sink }
 }
 
 type SessionEntry = { agentId: string; cwd: string; lastUsedAt: number }
 
+type Deferred = { promise: Promise<Response>; resolve: (r: Response) => void; reject: (e: unknown) => void }
+
+function deferred(): Deferred {
+  let resolve!: Deferred["resolve"]
+  let reject!: Deferred["reject"]
+  const promise = new Promise<Response>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
 type Held = {
   agent: SDKAgent
   cwd: string
-  run: Run
+  run: Run | null
   messages: OaMessage[]
   textAcc: string
   sink: Sink | null
+  // reply is settled on the first delta (streaming) or on finish/fail, so a
+  // pre-first-byte failure can still become a real HTTP status
+  reply: Deferred
+  response: Response | null
+  opened: boolean
+  detachSignal: (() => void) | null
   buffer: { kind: "text" | "reasoning"; t: string }[]
   pendingCalls: ToolCallOut[]
   parked: Map<string, (result: string) => void>
@@ -209,12 +262,22 @@ const DISK_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 const MAX_SESSIONS = 8
 const SESSION_STORE_DIR = join(homedir(), ".cache", "opencode-cursor-auth")
 const SESSION_STORE_PATH = join(SESSION_STORE_DIR, "sessions.json")
+const TMP_CWD_PREFIX = join(tmpdir(), "opencode-cursor-")
 
 const sessions = new Map<string, SessionEntry>()
 const heldByAgent = new Map<string, Held>()
 const agentByToolCallId = new Map<string, string>()
 let diskSessions = new Map<string, SessionEntry>()
 let sessionsLoaded = false
+
+// ponytail: no orphan sweep, other opencode instances may own those dirs
+function releaseCwd(cwd: string) {
+  if (!cwd.startsWith(TMP_CWD_PREFIX)) return
+  for (const v of sessions.values()) if (v.cwd === cwd) return
+  for (const v of diskSessions.values()) if (v.cwd === cwd) return
+  for (const h of heldByAgent.values()) if (h.cwd === cwd) return
+  rmSync(cwd, { recursive: true, force: true })
+}
 
 function hashMessages(messages: OaMessage[]): string {
   const norm = messages.map((m) => [m.role, textOf(m.content), m.tool_call_id ?? "", JSON.stringify(m.tool_calls ?? null)])
@@ -243,6 +306,7 @@ async function loadSessions() {
       // can't evict a still-valid 7-day entry; lookup falls back to diskSessions
       if (now - v.lastUsedAt <= DISK_SESSION_TTL_MS) diskSessions.set(k, v)
     }
+    for (const v of Object.values(raw.entries)) if (now - v.lastUsedAt > DISK_SESSION_TTL_MS) releaseCwd(v.cwd)
   } catch {}
 }
 
@@ -253,7 +317,17 @@ function saveSessions() {
 
 function sweepSessions(save = true) {
   const now = Date.now()
-  for (const [k, v] of sessions) if (now - v.lastUsedAt > SESSION_TTL_MS) sessions.delete(k)
+  const evicted: string[] = []
+  for (const [k, v] of diskSessions)
+    if (now - v.lastUsedAt > DISK_SESSION_TTL_MS) {
+      diskSessions.delete(k)
+      evicted.push(v.cwd)
+    }
+  for (const [k, v] of sessions)
+    if (now - v.lastUsedAt > SESSION_TTL_MS) {
+      sessions.delete(k)
+      evicted.push(v.cwd)
+    }
   while (sessions.size > MAX_SESSIONS) {
     let oldestKey = ""
     let oldest = Infinity
@@ -262,8 +336,10 @@ function sweepSessions(save = true) {
         oldest = v.lastUsedAt
         oldestKey = k
       }
+    evicted.push(sessions.get(oldestKey)!.cwd)
     sessions.delete(oldestKey)
   }
+  for (const cwd of evicted) releaseCwd(cwd)
   if (save) saveSessions()
 }
 
@@ -286,9 +362,11 @@ function rememberSession(held: Held, toolCalls: ToolCallOut[]) {
     cwd: held.cwd,
     lastUsedAt: Date.now(),
   }
+  const displaced = sessions.get(key) ?? diskSessions.get(key)
   sessions.set(key, entry)
   diskSessions.set(key, entry)
   sweepSessions()
+  if (displaced && displaced.cwd !== entry.cwd) releaseCwd(displaced.cwd)
 }
 
 async function syncAgentsMd(cwd: string, messages: OaMessage[]) {
@@ -324,57 +402,105 @@ function emit(held: Held, kind: "text" | "reasoning", t: string) {
   else held.buffer.push({ kind, t })
 }
 
+function openReply(held: Held) {
+  if (held.opened) return
+  held.opened = true
+  if (held.response) held.reply.resolve(held.response)
+}
+
 function attachSink(held: Held, sink: Sink) {
   held.sink = sink
+  if (held.buffer.length) openReply(held)
   for (const b of held.buffer) (b.kind === "text" ? sink.text : sink.reasoning)(b.t)
   held.buffer = []
 }
 
-function teardownHeld(agentId: string, held: Held) {
+function attachSignal(held: Held, signal: AbortSignal | undefined) {
+  held.detachSignal?.()
+  held.detachSignal = null
+  if (!signal) return
+  const onAbort = () => abortHeld(held)
+  signal.addEventListener("abort", onAbort, { once: true })
+  held.detachSignal = () => signal.removeEventListener("abort", onAbort)
+}
+
+function closeAgent(held: Held) {
+  try { held.agent.close() } catch {}
+}
+
+function teardownHeld(held: Held) {
   held.done = true
+  held.detachSignal?.()
+  held.detachSignal = null
   if (held.flushTimer) clearTimeout(held.flushTimer)
   if (held.idleTimer) clearTimeout(held.idleTimer)
   for (const id of held.parked.keys()) agentByToolCallId.delete(id)
-  heldByAgent.delete(agentId)
+  heldByAgent.delete(held.agent.agentId)
+}
+
+function failHeld(held: Held, err: unknown) {
+  teardownHeld(held)
+  if (held.response && !held.opened) {
+    held.opened = true
+    held.reply.resolve(errorResponse(err))
+    held.sink?.close()
+  } else {
+    held.sink?.fail(err)
+  }
+  closeAgent(held)
+  releaseCwd(held.cwd)
+}
+
+function abortHeld(held: Held) {
+  if (held.done) return
+  teardownHeld(held)
+  held.run?.cancel().catch(() => {})
+  closeAgent(held)
+  held.sink?.close()
+  held.reply.reject(new DOMException("aborted", "AbortError"))
+  releaseCwd(held.cwd)
 }
 
 /** Model requested tools: emit tool_calls, end this HTTP segment, park the run. */
-function flushToolCalls(agentId: string, held: Held) {
+function flushToolCalls(held: Held) {
   held.flushTimer = null
   if (held.done || !held.pendingCalls.length) return
   const calls = held.pendingCalls
   held.pendingCalls = []
-  for (const c of calls) agentByToolCallId.set(c.id, agentId)
+  for (const c of calls) agentByToolCallId.set(c.id, held.agent.agentId)
   const sink = held.sink
   held.sink = null
+  // the parked run outlives this HTTP segment, so its abort signal must not
+  // reach it; the continuation request attaches its own
+  held.detachSignal?.()
+  held.detachSignal = null
+  openReply(held)
   sink?.toolCalls(calls)
   sink?.finish("tool_calls")
   rememberSession(held, calls)
-  held.idleTimer = setTimeout(() => {
-    teardownHeld(agentId, held)
-    held.run.cancel().catch(() => {})
-    try { held.agent.close() } catch {}
-  }, TOOL_RESULT_TIMEOUT_MS)
+  held.idleTimer = setTimeout(() => abortHeld(held), TOOL_RESULT_TIMEOUT_MS)
   held.idleTimer.unref?.()
 }
 
-async function wireRunCompletion(agentId: string, held: Held) {
-  if (held.wired) return
+async function wireRunCompletion(held: Held) {
+  if (held.wired || !held.run) return
   held.wired = true
+  let result
   try {
-    const result = await held.run.wait()
-    if (held.done) return
-    const usage = mapUsage(result.usage) ?? held.usage
-    teardownHeld(agentId, held)
-    rememberSession(held, [])
-    held.sink?.finish("stop", usage)
-    try { held.agent.close() } catch {}
+    result = await held.run.wait()
   } catch (err) {
-    if (held.done) return
-    teardownHeld(agentId, held)
-    held.sink?.fail(err)
-    try { held.agent.close() } catch {}
+    if (!held.done) failHeld(held, err)
+    return
   }
+  if (held.done) return
+  if (result.status === "cancelled") return abortHeld(held)
+  if (result.status === "error") return failHeld(held, result.error ?? new Error("cursor run failed"))
+  const usage = mapUsage(result.usage) ?? held.usage
+  teardownHeld(held)
+  rememberSession(held, [])
+  openReply(held)
+  held.sink?.finish("stop", usage)
+  closeAgent(held)
 }
 
 export function _resetForTest() {
@@ -385,37 +511,48 @@ export function _resetForTest() {
   sessionsLoaded = false
 }
 
-export async function handleChatCompletion(body: OaBody, apiKey?: string): Promise<Response> {
+export function _stats() {
+  return { held: heldByAgent.size, sessions: sessions.size, disk: diskSessions.size }
+}
+
+export async function handleChatCompletion(body: OaBody, apiKey?: string, signal?: AbortSignal): Promise<Response> {
+  if (signal?.aborted) throw new DOMException("aborted", "AbortError")
   await loadSessions()
   const streaming = body.stream !== false
-  const sse = streaming ? sseResponse(body.model) : undefined
-  const collected = streaming ? undefined : jsonCollector(body.model)
-  const sink = (sse?.sink ?? collected?.sink)!
-  const reply = () => sse?.response ?? collected!.promise
+  const reply = deferred()
+  let held: Held | undefined
+  const sse = streaming ? sseResponse(body.model, () => held && abortHeld(held)) : undefined
+  const sink = sse?.sink ?? jsonCollector(body.model, reply.resolve)
 
   // continuation: trailing tool results for a parked run
   const lastMsg = body.messages[body.messages.length - 1]
-  if (lastMsg?.role === "tool" && lastMsg.tool_call_id && agentByToolCallId.has(lastMsg.tool_call_id)) {
-    const agentId = agentByToolCallId.get(lastMsg.tool_call_id)!
-    const held = heldByAgent.get(agentId)
-    if (held && !held.done) {
-      if (held.idleTimer) clearTimeout(held.idleTimer)
-      held.messages = body.messages
-      held.textAcc = ""
-      attachSink(held, sink)
-      for (const m of body.messages) {
-        if (m.role !== "tool" || !m.tool_call_id) continue
-        const resolve = held.parked.get(m.tool_call_id)
-        if (resolve) {
-          held.parked.delete(m.tool_call_id)
-          agentByToolCallId.delete(m.tool_call_id)
-          resolve(textOf(m.content))
-        }
-      }
-      return reply()
+  if (lastMsg?.role === "tool" && lastMsg.tool_call_id) {
+    const agentId = agentByToolCallId.get(lastMsg.tool_call_id)
+    held = agentId ? heldByAgent.get(agentId) : undefined
+    if (!held || held.done) {
+      return Response.json(
+        { error: { message: "cursor run for this tool call expired — please retry", type: "invalid_request_error", code: "tool_call_expired" } },
+        { status: 400 },
+      )
     }
-    sink.fail(new Error("cursor run for this tool call expired — please retry"))
-    return reply()
+    if (held.idleTimer) clearTimeout(held.idleTimer)
+    held.messages = body.messages
+    held.textAcc = ""
+    held.reply = reply
+    held.response = sse?.response ?? null
+    held.opened = false
+    attachSignal(held, signal)
+    attachSink(held, sink)
+    for (const m of body.messages) {
+      if (m.role !== "tool" || !m.tool_call_id) continue
+      const resolve = held.parked.get(m.tool_call_id)
+      if (resolve) {
+        held.parked.delete(m.tool_call_id)
+        agentByToolCallId.delete(m.tool_call_id)
+        resolve(textOf(m.content))
+      }
+    }
+    return reply.promise
   }
 
   // new turn: reuse the agent whose last-seen conversation matches our prefix
@@ -425,39 +562,44 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
   let agent: SDKAgent | undefined
   let cwd: string | undefined
   let newSuffix: OaMessage[] = body.messages
+  const agentOptions = (cwd: string) => ({
+    model: { id: body.model },
+    tools: ["mcp"] as ["mcp"],
+    ...(apiKey ? { apiKey } : {}),
+    local: { cwd, settingSources: ["project"] as ["project"], enableAgentRetries: true },
+  })
   if (entry) {
     sessions.delete(key)
+    diskSessions.delete(key)
     cwd = entry.cwd
-    agent = await Agent.resume(entry.agentId, {
-      model: { id: body.model },
-      tools: ["mcp"],
-      ...(apiKey ? { apiKey } : {}),
-      local: { cwd, settingSources: ["project"], enableAgentRetries: true },
-    }).catch(() => {
-      sessions.delete(key)
-      diskSessions.delete(key)
+    agent = await Agent.resume(entry.agentId, agentOptions(cwd)).catch(() => {
       saveSessions()
+      releaseCwd(entry.cwd)
       return undefined
     })
     if (agent) newSuffix = body.messages.slice(-1)
   }
   if (!agent) {
-    cwd = await mkdtemp(join(tmpdir(), "opencode-cursor-"))
-    agent = await Agent.create({
-      model: { id: body.model },
-      tools: ["mcp"],
-      ...(apiKey ? { apiKey } : {}),
-      local: { cwd, settingSources: ["project"], enableAgentRetries: true },
-    })
+    cwd = await mkdtemp(TMP_CWD_PREFIX)
+    try {
+      agent = await Agent.create(agentOptions(cwd))
+    } catch (err) {
+      releaseCwd(cwd)
+      return errorResponse(err)
+    }
   }
 
-  const held: Held = {
+  held = {
     agent,
     cwd: cwd!,
-    run: undefined as unknown as Run,
+    run: null,
     messages: body.messages,
     textAcc: "",
     sink: null,
+    reply,
+    response: sse?.response ?? null,
+    opened: false,
+    detachSignal: null,
     buffer: [],
     pendingCalls: [],
     parked: new Map(),
@@ -466,9 +608,11 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
     wired: false,
     done: false,
   }
+  const self = held
+  heldByAgent.set(agent.agentId, held)
+  attachSignal(held, signal)
   attachSink(held, sink)
 
-  const agentIdRef = { id: "" }
   const customTools: Record<string, unknown> = {}
   for (const t of body.tools ?? []) {
     customTools[t.function.name] = {
@@ -476,10 +620,10 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
       inputSchema: t.function.parameters ?? { type: "object", properties: {} },
       execute: (args: unknown, ctx: { toolCallId?: string }) => {
         const id = (ctx.toolCallId ?? `call_${randomUUID()}`).replace(/\s+/g, "_")
-        held.pendingCalls.push({ id, name: t.function.name, argumentsJson: JSON.stringify(args ?? {}) })
-        if (held.flushTimer) clearTimeout(held.flushTimer)
-        held.flushTimer = setTimeout(() => flushToolCalls(agentIdRef.id, held), BATCH_SETTLE_MS)
-        return new Promise<string>((resolve) => held.parked.set(id, resolve))
+        self.pendingCalls.push({ id, name: t.function.name, argumentsJson: JSON.stringify(args ?? {}) })
+        if (self.flushTimer) clearTimeout(self.flushTimer)
+        self.flushTimer = setTimeout(() => flushToolCalls(self), BATCH_SETTLE_MS)
+        return new Promise<string>((resolve) => self.parked.set(id, resolve))
       },
     }
   }
@@ -492,27 +636,34 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
       .filter(Boolean)
       .join("\n\n") || "(empty message)"
 
+  let run: Run
   try {
-    held.run = await held.agent.send(prompt, {
+    run = await agent.send(prompt, {
       onDelta: ({ update }: { update: { type: string; text?: string; usage?: { inputTokens?: number; outputTokens?: number } } }) => {
+        if (self.done) return
+        openReply(self)
         if (update.type === "text-delta" && update.text) {
-          held.textAcc += update.text
-          emit(held, "text", update.text)
+          self.textAcc += update.text
+          emit(self, "text", update.text)
         } else if (update.type === "thinking-delta" && update.text) {
-          emit(held, "reasoning", update.text)
+          emit(self, "reasoning", update.text)
         } else if (update.type === "turn-ended") {
-          held.usage = mapUsage(update.usage)
+          self.usage = mapUsage(update.usage)
         }
       },
       local: { customTools: customTools as never },
     })
   } catch (err) {
-    sink.fail(err)
-    return reply()
+    if (!self.done) failHeld(self, err)
+    return reply.promise
   }
-  agentIdRef.id = held.run.agentId
-  heldByAgent.set(held.run.agentId, held)
-  void wireRunCompletion(held.run.agentId, held)
+  if (self.done) {
+    run.cancel().catch(() => {})
+    return reply.promise
+  }
+  if (run.agentId !== agent.agentId) console.error(`[opencode-cursor-auth] run.agentId ${run.agentId} != agent.agentId ${agent.agentId}`)
+  self.run = run
+  void wireRunCompletion(self)
 
-  return reply()
+  return reply.promise
 }

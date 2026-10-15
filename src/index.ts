@@ -54,7 +54,8 @@ async function cursorFetch(input: Request | string | URL, init?: RequestInit): P
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
   if (url.includes("/chat/completions")) {
     const body = JSON.parse(await bodyText(input, init))
-    return handleChatCompletion(body, pastedApiKey)
+    const signal = init?.signal ?? (input instanceof Request ? input.signal : undefined)
+    return handleChatCompletion(body, pastedApiKey, signal)
   }
   if (url.includes("/models")) {
     return Response.json({
