@@ -27,7 +27,7 @@ Add the plugin to `~/.config/opencode/opencode.json`:
 
 ```json
 {
-  "plugin": ["opencode-cursor-auth@latest"]
+  "plugin": ["@vidit19sharma/opencode-cursor-auth@latest"]
 }
 ```
 
