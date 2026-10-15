@@ -10,8 +10,9 @@
  */
 import { Agent, type SDKAgent, type Run } from "@cursor/sdk"
 import { createHash, randomUUID } from "node:crypto"
-import { mkdtemp } from "node:fs/promises"
-import { tmpdir } from "node:os"
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtemp, readFile, writeFile } from "node:fs/promises"
+import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 
 type ContentPart = { type: string; text?: string }
@@ -187,19 +188,54 @@ type Held = {
 const BATCH_SETTLE_MS = 300
 const TOOL_RESULT_TIMEOUT_MS = 10 * 60 * 1000
 const SESSION_TTL_MS = 30 * 60 * 1000
+const DISK_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000
 // ponytail: single-user plugin, small fixed caps; make configurable if ever shared
 const MAX_SESSIONS = 8
+const SESSION_STORE_DIR = join(homedir(), ".cache", "opencode-cursor-auth")
+const SESSION_STORE_PATH = join(SESSION_STORE_DIR, "sessions.json")
 
 const sessions = new Map<string, SessionEntry>()
 const heldByAgent = new Map<string, Held>()
 const agentByToolCallId = new Map<string, string>()
+let diskSessions = new Map<string, SessionEntry>()
+let sessionsLoaded = false
 
 function hashMessages(messages: OaMessage[]): string {
   const norm = messages.map((m) => [m.role, textOf(m.content), m.tool_call_id ?? "", JSON.stringify(m.tool_calls ?? null)])
   return createHash("sha256").update(JSON.stringify(norm)).digest("hex")
 }
 
-function sweepSessions() {
+function collectDiskEntries(): Record<string, SessionEntry> {
+  const now = Date.now()
+  const entries: Record<string, SessionEntry> = {}
+  for (const [k, v] of diskSessions) if (now - v.lastUsedAt <= DISK_SESSION_TTL_MS) entries[k] = v
+  return entries
+}
+
+async function loadSessions() {
+  if (sessionsLoaded) return
+  sessionsLoaded = true
+  try {
+    const raw = JSON.parse(await readFile(SESSION_STORE_PATH, "utf8")) as {
+      version?: number
+      entries?: Record<string, SessionEntry>
+    }
+    if (raw.version !== 1 || !raw.entries) return
+    const now = Date.now()
+    for (const [k, v] of Object.entries(raw.entries)) {
+      // disk entries stay out of the 30-min memory map so the memory sweep
+      // can't evict a still-valid 7-day entry; lookup falls back to diskSessions
+      if (now - v.lastUsedAt <= DISK_SESSION_TTL_MS) diskSessions.set(k, v)
+    }
+  } catch {}
+}
+
+function saveSessions() {
+  mkdirSync(SESSION_STORE_DIR, { recursive: true })
+  writeFileSync(SESSION_STORE_PATH, JSON.stringify({ version: 1, entries: collectDiskEntries() }))
+}
+
+function sweepSessions(save = true) {
   const now = Date.now()
   for (const [k, v] of sessions) if (now - v.lastUsedAt > SESSION_TTL_MS) sessions.delete(k)
   while (sessions.size > MAX_SESSIONS) {
@@ -212,6 +248,7 @@ function sweepSessions() {
       }
     sessions.delete(oldestKey)
   }
+  if (save) saveSessions()
 }
 
 /**
@@ -227,12 +264,27 @@ function rememberSession(held: Held, toolCalls: ToolCallOut[]) {
       ? { tool_calls: toolCalls.map((c) => ({ id: c.id, function: { name: c.name, arguments: c.argumentsJson } })) }
       : {}),
   }
-  sessions.set(hashMessages(held.messages.concat(assistant)), {
+  const key = hashMessages(held.messages.concat(assistant))
+  const entry = {
     agentId: held.agent.agentId,
     cwd: held.cwd,
     lastUsedAt: Date.now(),
-  })
+  }
+  sessions.set(key, entry)
+  diskSessions.set(key, entry)
   sweepSessions()
+}
+
+async function syncAgentsMd(cwd: string, messages: OaMessage[]) {
+  mkdirSync(cwd, { recursive: true })
+  const path = join(cwd, "AGENTS.md")
+  const systemText = messages
+    .filter((m) => m.role === "system")
+    .map((m) => textOf(m.content))
+    .filter(Boolean)
+    .join("\n\n")
+  if (systemText) await writeFile(path, systemText)
+  else if (existsSync(path)) rmSync(path)
 }
 
 function mapUsage(u?: { inputTokens?: number; outputTokens?: number }): Usage | undefined {
@@ -301,7 +353,16 @@ async function wireRunCompletion(agentId: string, held: Held) {
   }
 }
 
+export function _resetForTest() {
+  sessions.clear()
+  diskSessions.clear()
+  heldByAgent.clear()
+  agentByToolCallId.clear()
+  sessionsLoaded = false
+}
+
 export async function handleChatCompletion(body: OaBody, apiKey?: string): Promise<Response> {
+  await loadSessions()
   const streaming = body.stream !== false
   const sse = streaming ? sseResponse(body.model) : undefined
   const collected = streaming ? undefined : jsonCollector(body.model)
@@ -336,7 +397,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
   // new turn: reuse the agent whose last-seen conversation matches our prefix
   const prefix = body.messages.slice(0, -1)
   const key = hashMessages(prefix)
-  const entry = sessions.get(key)
+  const entry = sessions.get(key) ?? diskSessions.get(key)
   let agent: SDKAgent | undefined
   let cwd: string | undefined
   let newSuffix: OaMessage[] = body.messages
@@ -347,8 +408,13 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
       model: { id: body.model },
       tools: ["mcp"],
       ...(apiKey ? { apiKey } : {}),
-      local: { cwd, settingSources: [], enableAgentRetries: true },
-    }).catch(() => undefined)
+      local: { cwd, settingSources: ["project"], enableAgentRetries: true },
+    }).catch(() => {
+      sessions.delete(key)
+      diskSessions.delete(key)
+      saveSessions()
+      return undefined
+    })
     if (agent) newSuffix = body.messages.slice(-1)
   }
   if (!agent) {
@@ -357,7 +423,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
       model: { id: body.model },
       tools: ["mcp"],
       ...(apiKey ? { apiKey } : {}),
-      local: { cwd, settingSources: [], enableAgentRetries: true },
+      local: { cwd, settingSources: ["project"], enableAgentRetries: true },
     })
   }
 
@@ -394,15 +460,13 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string): Promi
     }
   }
 
-  // cursor-agent has no --system-prompt flag: prepend system text to the prompt
-  const systemText = newSuffix
-    .filter((m) => m.role === "system")
-    .map((m) => textOf(m.content))
-    .join("\n\n")
-  const userParts = newSuffix
-    .filter((m) => m.role !== "system")
-    .map((m) => (m.role === "user" ? textOf(m.content) : `${m.role.toUpperCase()}: ${textOf(m.content)}`))
-  const prompt = [systemText, ...userParts].filter(Boolean).join("\n\n") || "(empty message)"
+  await syncAgentsMd(cwd!, body.messages)
+  const prompt =
+    newSuffix
+      .filter((m) => m.role !== "system")
+      .map((m) => (m.role === "user" ? textOf(m.content) : `${m.role.toUpperCase()}: ${textOf(m.content)}`))
+      .filter(Boolean)
+      .join("\n\n") || "(empty message)"
 
   try {
     held.run = await held.agent.send(prompt, {

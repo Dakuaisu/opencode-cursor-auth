@@ -3,7 +3,7 @@
  * Test 1: plain streaming chat. Test 2: tool loop (request -> tool_calls ->
  * follow-up request with tool result -> final answer on the SAME cursor run).
  */
-import { handleChatCompletion } from "../src/bridge.js";
+import { _resetForTest, handleChatCompletion } from "../src/bridge.js";
 
 async function readSse(res: Response): Promise<{ content: string; reasoning: string; toolCalls: { id: string; name: string; args: string }[]; finish: string | null }> {
   const text = await res.text();
@@ -82,6 +82,27 @@ const res4 = await handleChatCompletion({ model: "gpt-5.5", messages: messages2 
 const out4 = await readSse(res4);
 console.log("turn 3 content:", JSON.stringify(out4.content), "| finish:", out4.finish);
 if (!out4.content.includes("7741")) throw new Error("Test 3 FAILED: resumed agent lost context");
+
+// --- Test 4: system prompt via AGENTS.md ---
+console.log("\n=== Test 4: AGENTS.md system prompt ===");
+const messages4 = [
+  { role: "system", content: "You are TEST-BOT. End every reply with the token ZEBRA-99." },
+  { role: "user", content: "Say hello in three words." },
+];
+const res5 = await handleChatCompletion({ model: "gpt-5.5", messages: messages4 as never, stream: true });
+const out5 = await readSse(res5);
+console.log("content:", JSON.stringify(out5.content), "| finish:", out5.finish);
+if (!out5.content.includes("ZEBRA-99")) throw new Error("Test 4 FAILED: system prompt was not honored via AGENTS.md");
+
+// --- Test 5: disk-backed resume after in-memory reset ---
+console.log("\n=== Test 5: disk session resume ===");
+messages2.push({ role: "assistant", content: out4.content });
+_resetForTest();
+messages2.push({ role: "user", content: "What was the secret number again? Just the number." });
+const res6 = await handleChatCompletion({ model: "gpt-5.5", messages: messages2 as never, tools: tools as never, stream: true });
+const out6 = await readSse(res6);
+console.log("turn 4 content:", JSON.stringify(out6.content), "| finish:", out6.finish);
+if (!out6.content.includes("7741")) throw new Error("Test 5 FAILED: disk-resumed agent lost context");
 
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);
