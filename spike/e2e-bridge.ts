@@ -3,7 +3,13 @@
  * Test 1: plain streaming chat. Test 2: tool loop (request -> tool_calls ->
  * follow-up request with tool result -> final answer on the SAME cursor run).
  */
-import { _resetForTest, _stats, handleChatCompletion } from "../src/bridge.js";
+import { _resetForTest, _setMaxActive, _stats, handleChatCompletion, isTransient, withRetry } from "../src/bridge.js";
+import { resolveModel } from "../src/models.js";
+import { rmSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+rmSync(join(homedir(), ".cache", "opencode-cursor-auth", "models.json"), { force: true });
 
 async function readSse(res: Response): Promise<{ content: string; reasoning: string; toolCalls: { id: string; name: string; args: string }[]; finish: string | null }> {
   const text = await res.text();
@@ -224,6 +230,68 @@ const auto = models9["auto"]?.limit;
 console.log("gpt-5.5 limit:", JSON.stringify(gpt), "| auto limit:", JSON.stringify(auto), "| models:", Object.keys(models9).length);
 if (gpt?.context !== 272000 || gpt?.output !== 32000) throw new Error(`Test 9 FAILED: gpt-5.5 limit ${JSON.stringify(gpt)}`);
 if (!(typeof auto?.context === "number" && auto.context > 0)) throw new Error(`Test 9 FAILED: auto limit ${JSON.stringify(auto)}`);
+
+// --- Test 10: model variants ---
+console.log("\n=== Test 10: variants ===");
+const ids10 = Object.keys(models9);
+for (const base of ["gpt-5.5", "claude-opus-5-5"]) console.log(base, "ids:", JSON.stringify(ids10.filter((id) => id === base || id.startsWith(`${base}-`))));
+console.log("total model ids:", ids10.length);
+const gptVariants = ids10.filter((id) => id.startsWith("gpt-5.5-") && resolveModel(id)?.params);
+if (!gptVariants.length) throw new Error("Test 10 FAILED: no gpt-5.5 variant ids");
+const variant = gptVariants.includes("gpt-5.5-low") ? "gpt-5.5-low" : gptVariants[0];
+console.log(variant, "->", JSON.stringify(resolveModel(variant)));
+if (resolveModel("gpt-5.5")?.id !== "gpt-5.5" || resolveModel("gpt-5.5")?.params) throw new Error("Test 10 FAILED: base resolve");
+if (resolveModel("nope") !== undefined) throw new Error("Test 10 FAILED: unknown id resolved");
+const out10 = await readSse(
+  await handleChatCompletion({ model: variant, messages: [{ role: "user", content: "Reply with exactly the word VARIANT-OK." }] as never, stream: true }),
+);
+console.log("content:", JSON.stringify(out10.content), "| finish:", out10.finish);
+if (out10.finish !== "stop" || !out10.content) throw new Error("Test 10 FAILED: variant chat");
+
+// --- Test 11: concurrency cap ---
+console.log("\n=== Test 11: concurrency cap ===");
+_setMaxActive(1);
+let maxActive11 = 0;
+let maxWaiting11 = 0;
+const sampler = setInterval(() => {
+  const st = _stats();
+  maxActive11 = Math.max(maxActive11, st.active);
+  maxWaiting11 = Math.max(maxWaiting11, st.waiting);
+}, 50);
+const outs11 = await Promise.all(
+  [1, 2, 3].map((i) =>
+    handleChatCompletion(
+      { model: "gpt-5.5", messages: [{ role: "user", content: "Reply with exactly the word CAP-OK." }] as never, stream: true },
+      undefined,
+      undefined,
+      `ses_cap_${i}`,
+    ).then(readSse),
+  ),
+);
+clearInterval(sampler);
+_setMaxActive(4);
+console.log("replies:", JSON.stringify(outs11.map((o) => o.content)), "| max active:", maxActive11, "| max waiting:", maxWaiting11);
+if (maxActive11 > 1 || maxWaiting11 < 1) throw new Error("Test 11 FAILED: cap not enforced");
+if (outs11.some((o) => !o.content)) throw new Error("Test 11 FAILED: empty reply");
+
+// --- Test 12: retry (no network) ---
+console.log("\n=== Test 12: retry ===");
+let calls12 = 0;
+const ok12 = await withRetry(async () => {
+  if (++calls12 < 3) throw { status: 429, message: "rate" };
+  return "ok";
+}, undefined, 1);
+if (ok12 !== "ok" || calls12 !== 3) throw new Error(`Test 12 FAILED: 429 retry -> ${ok12} after ${calls12}`);
+let calls12b = 0;
+const err12b = await withRetry(async () => { calls12b++; throw { status: 401 }; }, undefined, 1).catch((e) => e);
+if (err12b?.status !== 401 || calls12b !== 1) throw new Error(`Test 12 FAILED: 401 -> ${calls12b} calls`);
+let calls12c = 0;
+const ac12 = new AbortController();
+ac12.abort();
+const err12c = await withRetry(async () => { calls12c++; return "x"; }, ac12.signal, 1).catch((e) => e);
+if (err12c?.name !== "AbortError" || calls12c !== 0) throw new Error(`Test 12 FAILED: aborted -> ${err12c} after ${calls12c}`);
+if (!isTransient(new Error("fetch failed")) || isTransient({ status: 400 })) throw new Error("Test 12 FAILED: isTransient");
+console.log("429 x2 -> ok after", calls12, "calls | 401 ->", calls12b, "call | aborted ->", calls12c, "calls");
 
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);

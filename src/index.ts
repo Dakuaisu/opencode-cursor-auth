@@ -1,59 +1,14 @@
 import type { Plugin } from "@opencode-ai/plugin"
-import { Cursor, type ModelListItem, type SdkAuthStatus } from "@cursor/sdk"
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs"
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { Cursor, type SdkAuthStatus } from "@cursor/sdk"
 import { errorResponse, handleChatCompletion } from "./bridge.js"
+import { currentModels } from "./models.js"
+export { parseContext } from "./models.js"
 
 const BASE_URL = "http://cursor.local/v1"
 
-const CACHE_DIR = join(homedir(), ".cache", "opencode-cursor-auth")
-const MODELS_CACHE_PATH = join(CACHE_DIR, "models.json")
-const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 // Cursor publishes no output limit and the bridge never passes max_tokens to Cursor, so output is only an accounting reserve for opencode.
 const DEFAULT_CONTEXT = 200_000
 const DEFAULT_OUTPUT = 32_000
-
-type ModelInfo = { name: string; context?: number }
-type ModelsCache = { version: 2; fetchedAt: number; models: Record<string, ModelInfo> }
-
-export function parseContext(m: ModelListItem): number | undefined {
-  const raw = m.parameters?.find((p) => p.id === "context")?.values[0]?.value
-  const match = raw?.trim().match(/^(\d+)([km]?)$/i)
-  if (!match) return undefined
-  const unit = match[2].toLowerCase()
-  return Number(match[1]) * (unit === "k" ? 1_000 : unit === "m" ? 1_000_000 : 1)
-}
-
-function loadCachedModels(): ModelsCache | undefined {
-  try {
-    const raw = JSON.parse(readFileSync(MODELS_CACHE_PATH, "utf8")) as ModelsCache
-    if (raw?.version === 2 && raw.models && Object.keys(raw.models).length > 0) return raw
-  } catch {
-    // no cache yet, or unreadable — fall back
-  }
-  return undefined
-}
-
-// Live model list from Cursor, cached 24h to keep opencode startup fast.
-// Offline/logged-out: stale cache if present, else just "auto" (Cursor's universal alias).
-async function currentModels(): Promise<Record<string, ModelInfo>> {
-  const cached = loadCachedModels()
-  if (cached && Date.now() - cached.fetchedAt <= MODELS_CACHE_TTL_MS) return cached.models
-  try {
-    const list = await Cursor.models.list()
-    const models: Record<string, ModelInfo> = {}
-    for (const m of list) {
-      const context = parseContext(m)
-      models[m.id === "default" ? "auto" : m.id] = { name: m.displayName ?? m.id, ...(context ? { context } : {}) }
-    }
-    mkdirSync(CACHE_DIR, { recursive: true })
-    writeFileSync(MODELS_CACHE_PATH, JSON.stringify({ version: 2, fetchedAt: Date.now(), models } satisfies ModelsCache))
-    return models
-  } catch {
-    return cached?.models ?? { auto: { name: "Auto" } }
-  }
-}
 
 export function keyProblem(status: SdkAuthStatus, nowMs: number): string | undefined {
   if (status.status !== "logged-in") return "Cursor SDK key missing — run `opencode auth login` and pick Cursor"

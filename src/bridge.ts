@@ -8,12 +8,13 @@
  * next HTTP request (role:"tool" messages) resolves the parked promises and
  * the SAME run continues — one metered Cursor run per opencode tool loop.
  */
-import { Agent, AuthenticationError, ConfigurationError, RateLimitError, type SDKAgent, type Run } from "@cursor/sdk"
+import { Agent, AuthenticationError, ConfigurationError, NetworkError, RateLimitError, type SDKAgent, type Run } from "@cursor/sdk"
 import { createHash, randomUUID } from "node:crypto"
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
+import { resolveModel } from "./models.js"
 
 // @cursor/sdk's internal logger writes "HH:MM:SS.mmm INFO ..." lines via
 // console.log unconditionally (no config/env to silence it, verified against
@@ -95,6 +96,77 @@ function errorBody(err: unknown, status = statusFor(err)): ErrorBody {
       ...(typeof e.code === "string" ? { code: e.code } : {}),
     },
   }
+}
+
+const abortError = () => new DOMException("aborted", "AbortError")
+
+export function isTransient(err: unknown): boolean {
+  const e = (typeof err === "object" && err !== null ? err : {}) as { message?: unknown; code?: unknown; status?: unknown; name?: unknown }
+  if (e.name === "AbortError") return false
+  const status = statusFor(err)
+  if (status === 429) return true
+  if (status === 400 || status === 401 || e.status === 403 || e.status === 404) return false
+  if (err instanceof NetworkError || (typeof e.status === "number" && e.status >= 500)) return true
+  return /unavailable|deadline_exceeded|ECONNRESET|ETIMEDOUT|fetch failed/i.test(`${e.code ?? ""} ${e.message ?? ""}`)
+}
+
+export async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal, baseDelayMs = 1000, retryable = isTransient): Promise<T> {
+  for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) throw abortError()
+    try {
+      return await fn()
+    } catch (err) {
+      if (attempt >= 2 || signal?.aborted || !retryable(err)) throw err
+      const delay = Math.min(baseDelayMs * 2 ** attempt * (0.75 + Math.random() * 0.5), 30_000)
+      await new Promise((r) => {
+        const t = setTimeout(r, delay)
+        signal?.addEventListener("abort", () => (clearTimeout(t), r(undefined)), { once: true })
+      })
+    }
+  }
+}
+
+// ponytail: global semaphore, slot held across parked tool loops; per-session fairness if it ever matters
+let maxActive = Number(process.env.OPENCODE_CURSOR_MAX_ACTIVE) || 4
+let active = 0
+const waiters: (() => void)[] = []
+
+function pump() {
+  while (active < maxActive && waiters.length) {
+    active++
+    waiters.shift()!()
+  }
+}
+
+function acquireSlot(signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError())
+  if (active < maxActive && !waiters.length) {
+    active++
+    return Promise.resolve()
+  }
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      const i = waiters.indexOf(go)
+      if (i >= 0) waiters.splice(i, 1)
+      reject(abortError())
+    }
+    const go = () => {
+      signal?.removeEventListener("abort", onAbort)
+      resolve()
+    }
+    signal?.addEventListener("abort", onAbort, { once: true })
+    waiters.push(go)
+  })
+}
+
+function releaseSlot() {
+  active--
+  pump()
+}
+
+export function _setMaxActive(n: number) {
+  maxActive = n
+  pump()
 }
 
 export function errorResponse(err: unknown, status = statusFor(err)): Response {
@@ -253,6 +325,7 @@ type Held = {
   usage?: Usage
   wired: boolean
   done: boolean
+  slot: boolean
 }
 
 const BATCH_SETTLE_MS = 300
@@ -434,6 +507,10 @@ function closeAgent(held: Held) {
 
 function teardownHeld(held: Held) {
   held.done = true
+  if (held.slot) {
+    held.slot = false
+    releaseSlot()
+  }
   held.detachSignal?.()
   held.detachSignal = null
   if (held.flushTimer) clearTimeout(held.flushTimer)
@@ -521,6 +598,8 @@ export function _stats() {
     sessions: sessions.size,
     disk: diskSessions.size,
     agentIds: [...sessions.values()].map((v) => v.agentId).sort(),
+    active,
+    waiting: waiters.length,
   }
 }
 
@@ -567,12 +646,13 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
   // new turn: reuse the agent whose last-seen conversation matches our prefix
   const prefix = body.messages.slice(0, -1)
   const key = hashMessages(prefix, scope)
+  await acquireSlot(signal)
   const entry = sessions.get(key) ?? diskSessions.get(key)
   let agent: SDKAgent | undefined
   let cwd: string | undefined
   let newSuffix: OaMessage[] = body.messages
   const agentOptions = (cwd: string) => ({
-    model: { id: body.model },
+    model: resolveModel(body.model) ?? { id: body.model },
     tools: ["mcp"] as ["mcp"],
     ...(apiKey ? { apiKey } : {}),
     local: { cwd, settingSources: ["project"] as ["project"], enableAgentRetries: true },
@@ -581,7 +661,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     sessions.delete(key)
     diskSessions.delete(key)
     cwd = entry.cwd
-    agent = await Agent.resume(entry.agentId, agentOptions(cwd)).catch(() => {
+    agent = await withRetry(() => Agent.resume(entry.agentId, agentOptions(cwd!)), signal).catch(() => {
       saveSessions()
       releaseCwd(entry.cwd)
       return undefined
@@ -591,9 +671,11 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
   if (!agent) {
     cwd = await mkdtemp(TMP_CWD_PREFIX)
     try {
-      agent = await Agent.create(agentOptions(cwd))
+      agent = await withRetry(() => Agent.create(agentOptions(cwd!)), signal)
     } catch (err) {
+      releaseSlot()
       releaseCwd(cwd)
+      if (signal?.aborted) throw abortError()
       return errorResponse(err)
     }
   }
@@ -617,6 +699,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     idleTimer: null,
     wired: false,
     done: false,
+    slot: true,
   }
   const self = held
   heldByAgent.set(agent.agentId, held)
@@ -648,7 +731,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
 
   let run: Run
   try {
-    run = await agent.send(prompt, {
+    run = await withRetry(() => agent.send(prompt, {
       onDelta: ({ update }: { update: { type: string; text?: string; usage?: { inputTokens?: number; outputTokens?: number } } }) => {
         if (self.done) return
         openReply(self)
@@ -662,7 +745,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
         }
       },
       local: { customTools: customTools as never },
-    })
+    }), signal, 1000, (err) => !self.opened && !self.done && isTransient(err))
   } catch (err) {
     if (!self.done) failHeld(self, err)
     return reply.promise
