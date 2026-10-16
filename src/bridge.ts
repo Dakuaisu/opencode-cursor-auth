@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { mkdtemp, readFile, writeFile } from "node:fs/promises"
 import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
-import { markBlocked, resolveModel } from "./models.js"
+import { markBlocked, resolveVariant } from "./models.js"
 
 // @cursor/sdk's internal logger writes "HH:MM:SS.mmm INFO ..." lines via
 // console.log unconditionally (no config/env to silence it, verified against
@@ -42,6 +42,7 @@ type OaBody = {
   messages: OaMessage[]
   tools?: OaTool[]
   stream?: boolean
+  cursor_params?: unknown
 }
 
 function textOf(content: OaMessage["content"]): string {
@@ -647,6 +648,10 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     return reply.promise
   }
 
+  // opencode wraps variant options as providerOptions.cursor; @ai-sdk/openai-compatible (name "cursor") spreads them into the body top level
+  const model = resolveVariant(body.model, body.cursor_params) ?? { id: body.model }
+  if (typeof model === "string") return errorResponse(model, 400)
+
   // new turn: reuse the agent whose last-seen conversation matches our prefix
   const prefix = body.messages.slice(0, -1)
   const key = hashMessages(prefix, scope)
@@ -656,7 +661,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
   let cwd: string | undefined
   let newSuffix: OaMessage[] = body.messages
   const agentOptions = (cwd: string) => ({
-    model: resolveModel(body.model) ?? { id: body.model },
+    model,
     tools: ["mcp"] as ["mcp"],
     ...(apiKey ? { apiKey } : {}),
     local: { cwd, settingSources: ["project"] as ["project"], enableAgentRetries: true },

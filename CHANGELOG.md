@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+- Model variants moved to opencode's native variant picker (Ctrl+T): only the 47 base ids are published, and each Cursor variant (e.g. `low`, `272k-none`, `no-thinking`, `fast`) is an opencode `variants` entry sent as `cursor_params` in the request body. Unknown variant params return 400.
+- The base id now uses Cursor's real default variant (`isDefault`) and sends its params explicitly; previously it implied the first-listed param values (e.g. `gpt-5.5` is now 1M context / medium reasoning, was 272k).
+- **Breaking:** suffixed variant ids like `cursor/gpt-5.5-low-fast` are removed; pick the base model and choose the variant with Ctrl+T. Models cache bumped to v4 (refetched once).
+
 ## 0.2.0 — 2026-10-16
 
 ### Added

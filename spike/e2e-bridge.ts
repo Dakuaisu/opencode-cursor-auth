@@ -4,7 +4,7 @@
  * follow-up request with tool result -> final answer on the SAME cursor run).
  */
 import { _resetForTest, _setMaxActive, _stats, handleChatCompletion, isTransient, withRetry } from "../src/bridge.js";
-import { currentModels, resolveModel } from "../src/models.js";
+import { currentModels, resolveModel, resolveVariant } from "../src/models.js";
 import { rmSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -228,25 +228,38 @@ const models9 = (cfg as { provider: { cursor: { models: Record<string, { limit?:
 const gpt = models9["gpt-5.5"]?.limit;
 const auto = models9["auto"]?.limit;
 console.log("gpt-5.5 limit:", JSON.stringify(gpt), "| auto limit:", JSON.stringify(auto), "| models:", Object.keys(models9).length);
-if (gpt?.context !== 272000 || gpt?.output !== 32000) throw new Error(`Test 9 FAILED: gpt-5.5 limit ${JSON.stringify(gpt)}`);
+if (gpt?.context !== 1_000_000 || gpt?.output !== 32000) throw new Error(`Test 9 FAILED: gpt-5.5 limit ${JSON.stringify(gpt)}`);
 if (!(typeof auto?.context === "number" && auto.context > 0)) throw new Error(`Test 9 FAILED: auto limit ${JSON.stringify(auto)}`);
 
-// --- Test 10: model variants ---
+// --- Test 10: model variants (opencode Ctrl+T) ---
 console.log("\n=== Test 10: variants ===");
-const ids10 = Object.keys(models9);
-for (const base of ["gpt-5.5", "claude-opus-5-5"]) console.log(base, "ids:", JSON.stringify(ids10.filter((id) => id === base || id.startsWith(`${base}-`))));
+type Cfg10 = Record<string, { variants?: Record<string, { cursor_params: { id: string; value: string }[] }> }>;
+const models10 = models9 as Cfg10;
+const ids10 = Object.keys(models10);
 console.log("total model ids:", ids10.length);
-const gptVariants = ids10.filter((id) => id.startsWith("gpt-5.5-") && resolveModel(id)?.params);
-if (!gptVariants.length) throw new Error("Test 10 FAILED: no gpt-5.5 variant ids");
-const variant = gptVariants.includes("gpt-5.5-low") ? "gpt-5.5-low" : gptVariants[0];
-console.log(variant, "->", JSON.stringify(resolveModel(variant)));
-if (resolveModel("gpt-5.5")?.id !== "gpt-5.5" || resolveModel("gpt-5.5")?.params) throw new Error("Test 10 FAILED: base resolve");
+if (ids10.length > 60 || ids10.length < 40) throw new Error(`Test 10 FAILED: ${ids10.length} model ids`);
+for (const base of ["gpt-5.5", "claude-opus-5", "grok-4.7"]) console.log(base, "variants:", JSON.stringify(Object.keys(models10[base]?.variants ?? {})));
+const gptV = models10["gpt-5.5"]?.variants ?? {};
+if (Object.keys(gptV).length < 5) throw new Error("Test 10 FAILED: gpt-5.5 has < 5 variants");
+if (!gptV["low"] || !gptV["272k-none"]) throw new Error("Test 10 FAILED: gpt-5.5 missing low / 272k-none");
+if (!models10["claude-opus-5"]?.variants?.["no-thinking"]) throw new Error("Test 10 FAILED: claude-opus-5 missing no-thinking");
+const base10 = resolveModel("gpt-5.5");
+console.log("resolveModel(gpt-5.5):", JSON.stringify(base10));
+if (base10?.id !== "gpt-5.5" || !base10.params?.some((p) => p.id === "reasoning" && p.value === "medium")) throw new Error("Test 10 FAILED: base resolve");
+const low10 = resolveVariant("gpt-5.5", gptV["low"].cursor_params);
+console.log("resolveVariant(gpt-5.5, low):", JSON.stringify(low10));
+if (typeof low10 !== "object" || !low10.params?.some((p) => p.id === "reasoning" && p.value === "low")) throw new Error("Test 10 FAILED: low variant resolve");
+if (typeof resolveVariant("gpt-5.5", [{ id: "reasoning", value: "ultra" }]) !== "string") throw new Error("Test 10 FAILED: bad param accepted");
+if (resolveModel("gpt-5.5-low") !== undefined) throw new Error("Test 10 FAILED: suffixed id still resolves");
 if (resolveModel("nope") !== undefined) throw new Error("Test 10 FAILED: unknown id resolved");
 const out10 = await readSse(
-  await handleChatCompletion({ model: variant, messages: [{ role: "user", content: "Reply with exactly the word VARIANT-OK." }] as never, stream: true }),
+  await handleChatCompletion({ model: "gpt-5.5", cursor_params: gptV["low"].cursor_params, messages: [{ role: "user", content: "Reply with exactly the word VARIANT-OK." }] as never, stream: true }),
 );
 console.log("content:", JSON.stringify(out10.content), "| finish:", out10.finish);
 if (out10.finish !== "stop" || !out10.content) throw new Error("Test 10 FAILED: variant chat");
+const bad10 = await handleChatCompletion({ model: "gpt-5.5", cursor_params: [{ id: "reasoning", value: "ultra" }], messages: [{ role: "user", content: "x" }] as never, stream: true });
+console.log("bad variant:", bad10.status, await bad10.text(), "| active:", _stats().active);
+if (bad10.status !== 400 || _stats().active !== 0) throw new Error("Test 10 FAILED: bad variant must be 400 with no slot taken");
 
 // --- Test 11: concurrency cap ---
 console.log("\n=== Test 11: concurrency cap ===");

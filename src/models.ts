@@ -7,15 +7,23 @@ const CACHE_DIR = join(homedir(), ".cache", "opencode-cursor-auth")
 const MODELS_CACHE_PATH = join(CACHE_DIR, "models.json")
 const MODELS_CACHE_TTL_MS = 24 * 60 * 60 * 1000
 
-export type ModelInfo = { name: string; context?: number; base?: string; params?: ModelParameterValue[]; blocked?: true }
-type ModelsCache = { version: 3; fetchedAt: number; models: Record<string, ModelInfo> }
+type Variant = { params: ModelParameterValue[]; context?: number }
+export type ModelInfo = {
+  name: string
+  context?: number
+  params?: ModelParameterValue[]
+  variants?: Record<string, Variant>
+  allowed?: Record<string, string[]>
+  blocked?: true
+}
+type ModelsCache = { version: 4; fetchedAt: number; models: Record<string, ModelInfo> }
 
 let catalog: Record<string, ModelInfo> = {}
 let fetchedAt = 0
 
 function saveCatalog() {
   mkdirSync(CACHE_DIR, { recursive: true })
-  writeFileSync(MODELS_CACHE_PATH, JSON.stringify({ version: 3, fetchedAt, models: catalog } satisfies ModelsCache))
+  writeFileSync(MODELS_CACHE_PATH, JSON.stringify({ version: 4, fetchedAt, models: catalog } satisfies ModelsCache))
 }
 
 function contextValue(raw?: string): number | undefined {
@@ -31,23 +39,31 @@ export function parseContext(m: ModelListItem): number | undefined {
 
 export function buildCatalog(list: ModelListItem[]): Record<string, ModelInfo> {
   const models: Record<string, ModelInfo> = {}
-  const rename = (id: string) => (id === "default" ? "auto" : id)
   for (const m of list) {
-    const context = parseContext(m)
-    models[rename(m.id)] = { name: m.displayName ?? m.id, ...(context ? { context } : {}) }
-  }
-  for (const m of list) {
-    const base = rename(m.id)
+    const def = m.variants?.find((v) => v.isDefault) ?? m.variants?.[0]
+    const ctxOf = (ps?: ModelParameterValue[]) => contextValue(ps?.find((p) => p.id === "context")?.value)
+    const context = ctxOf(def?.params) ?? parseContext(m)
+    const allowed: Record<string, string[]> = {}
+    const allow = (id: string, value: string) => {
+      if (!(allowed[id] ??= []).includes(value)) allowed[id].push(value)
+    }
+    for (const p of m.parameters ?? []) for (const v of p.values) allow(p.id, v.value)
+    const variants: Record<string, Variant> = {}
     for (const v of m.variants ?? []) {
-      // id = base + non-default param values (first listed value is the default); "true" flags use the param id, e.g. gpt-5.5-low-fast
-      const parts = v.params
-        .filter((p) => m.parameters?.find((d) => d.id === p.id)?.values[0]?.value !== p.value)
-        .map((p) => (p.value === "true" ? p.id : p.value))
-      const id = [base, ...parts].join("-")
-      if (models[id]) continue
-      const context = contextValue(v.params.find((p) => p.id === "context")?.value) ?? models[base].context
-      const label = v.displayName && v.displayName !== m.displayName ? v.displayName : parts.join(" ")
-      models[id] = { name: `${models[base].name} (${label})`, ...(context ? { context } : {}), base, params: v.params }
+      for (const p of v.params) allow(p.id, p.value)
+      const name = v.params
+        .filter((p) => def?.params.find((d) => d.id === p.id)?.value !== p.value)
+        .map((p) => (p.value === "true" ? p.id : p.value === "false" ? `no-${p.id}` : p.value))
+        .join("-")
+      if (!name || variants[name]) continue
+      const vctx = ctxOf(v.params) ?? context
+      variants[name] = { params: v.params, ...(vctx ? { context: vctx } : {}) }
+    }
+    models[m.id === "default" ? "auto" : m.id] = {
+      name: m.displayName ?? m.id,
+      ...(context ? { context } : {}),
+      ...(def ? { params: def.params, allowed } : {}),
+      ...(Object.keys(variants).length ? { variants } : {}),
     }
   }
   return models
@@ -56,7 +72,7 @@ export function buildCatalog(list: ModelListItem[]): Record<string, ModelInfo> {
 function loadCachedModels(): ModelsCache | undefined {
   try {
     const raw = JSON.parse(readFileSync(MODELS_CACHE_PATH, "utf8")) as ModelsCache
-    if (raw?.version === 3 && raw.models && Object.keys(raw.models).length > 0) return raw
+    if (raw?.version === 4 && raw.models && Object.keys(raw.models).length > 0) return raw
   } catch {
     // no cache yet, or unreadable — fall back
   }
@@ -97,21 +113,27 @@ export function resolveModel(opencodeId: string): ModelSelection | undefined {
   loadCatalog()
   const m = catalog[opencodeId]
   if (!m) return undefined
-  return m.base && m.params ? { id: m.base, params: m.params } : { id: opencodeId }
+  return m.params ? { id: opencodeId, params: m.params } : { id: opencodeId }
+}
+
+export function resolveVariant(opencodeId: string, params?: unknown): ModelSelection | string | undefined {
+  if (!Array.isArray(params)) return resolveModel(opencodeId)
+  loadCatalog()
+  const allowed = catalog[opencodeId]?.allowed ?? {}
+  for (const p of params) {
+    if (!allowed[p?.id]?.includes(p?.value)) return `unknown variant param ${p?.id}=${p?.value} for model ${opencodeId}`
+  }
+  return { id: opencodeId, params: params.map((p) => ({ id: p.id, value: p.value })) }
 }
 
 export function markBlocked(opencodeId: string) {
   loadCatalog()
-  const base = catalog[opencodeId]?.base ?? opencodeId
-  let changed = false
-  for (const [id, m] of Object.entries(catalog)) {
-    if ((id === base || m.base === base) && !m.blocked) m.blocked = changed = true
-  }
-  if (changed) {
-    try {
-      saveCatalog()
-    } catch {
-      // cache dir unwritable — the in-memory flag still hides it for this process
-    }
+  const m = catalog[opencodeId]
+  if (!m || m.blocked) return
+  m.blocked = true
+  try {
+    saveCatalog()
+  } catch {
+    // cache dir unwritable — the in-memory flag still hides it for this process
   }
 }

@@ -80,11 +80,12 @@ export const CursorAuthPlugin: Plugin = async () => {
       cursor.name ??= "Cursor"
       cursor.options = { ...cursor.options, baseURL: BASE_URL }
       cursor.models ??= {}
-      for (const [id, { name, context }] of Object.entries(await currentModels())) {
+      for (const [id, { name, context, variants }] of Object.entries(await currentModels())) {
         cursor.models[id] ??= { name }
-        const model = cursor.models[id]
+        const model = cursor.models[id] as (typeof cursor.models)[string] & { variants?: Record<string, Record<string, unknown>> }
         model.cost = { input: 0, output: 0, cache_read: 0, cache_write: 0 }
         model.limit ??= { context: context ?? DEFAULT_CONTEXT, output: DEFAULT_OUTPUT }
+        if (variants) model.variants ??= Object.fromEntries(Object.entries(variants).map(([n, v]) => [n, { cursor_params: v.params }]))
       }
     },
 
