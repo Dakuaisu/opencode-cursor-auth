@@ -2,6 +2,12 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.3.1 — 2026-10-16
+
+### Fixed
+
+- opencode crashed at startup on a fresh machine (`undefined is not an object (evaluating 'C.provider')`, and `C.auth` on `opencode auth login`) as soon as the plugin was enabled. opencode invokes **every named export** of a plugin module as a plugin; the entry module also exported `CursorAuthPlugin`, `keyProblem` and `parseContext`, so opencode called the helpers as plugins and tried to read hooks off their return values. The entry now exposes only `default`; helpers moved to `src/plugin.ts`. Affects 0.1.0–0.3.0. A test guards the export shape.
+
 ## 0.3.0 — 2026-10-16
 
 ### Breaking

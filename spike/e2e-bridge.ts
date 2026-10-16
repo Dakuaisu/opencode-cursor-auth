@@ -32,8 +32,15 @@ async function readSse(res: Response): Promise<{ content: string; reasoning: str
   return { content, reasoning, toolCalls, finish };
 }
 
+// --- Test 0: plugin entry exposes exactly one export ---
+// opencode calls every named export of a plugin module as a plugin; a stray helper export crashes opencode at startup on a fresh machine
+console.log("=== Test 0: plugin entry exports ===");
+const entryExports = Object.keys(await import("../src/index.js"));
+console.log("exports:", entryExports);
+if (entryExports.length !== 1 || entryExports[0] !== "default") throw new Error(`Test 0 FAILED: src/index.ts must export only default, got ${entryExports}`);
+
 // --- Test 1: plain chat, streaming ---
-console.log("=== Test 1: plain streaming chat ===");
+console.log("\n=== Test 1: plain streaming chat ===");
 const messages1 = [
   { role: "system", content: "You are a terse assistant. Reply in one short sentence." },
   { role: "user", content: "Say BRIDGE-OK and nothing else." },
@@ -205,7 +212,7 @@ console.log("stats:", JSON.stringify(_stats()));
 
 // --- Test 9: model limits + key check (no network beyond the cached catalog) ---
 console.log("\n=== Test 9: model limits + key check ===");
-const { CursorAuthPlugin, parseContext, keyProblem } = await import("../src/index.js");
+const { CursorAuthPlugin, parseContext, keyProblem } = await import("../src/plugin.js");
 const item = (value?: string) => ({ id: "m", displayName: "M", parameters: value ? [{ id: "context", values: [{ value }] }] : [] });
 const ctxCases: [string | undefined, number | undefined][] = [["272k", 272000], ["1m", 1000000], ["200K", 200000], [undefined, undefined]];
 for (const [input, expected] of ctxCases) {
