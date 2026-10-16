@@ -28,6 +28,14 @@ The plugin bridges opencode's OpenAI-style chat requests to the official [`@curs
 
 ## Install
 
+For AI agents — paste this into any LLM agent:
+
+```
+Install the @vidit19sharma/opencode-cursor-auth plugin and configure it by following: https://raw.githubusercontent.com/vidit19sharma/opencode-cursor-auth/main/installation.md
+```
+
+See [installation.md](installation.md) for the step-by-step agent instructions.
+
 Add the plugin to `~/.config/opencode/opencode.json`:
 
 ```json
