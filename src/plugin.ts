@@ -50,11 +50,18 @@ async function bodyText(input: Request | string | URL, init?: RequestInit): Prom
   return ""
 }
 
+export function _resetKeyCache() {
+  keyStatus = undefined
+  warnedExpiry = false
+}
+
 let pastedApiKey: string | undefined
+const EMPTY_KEY = "Cursor API key is empty — run `opencode auth login` and pick Cursor, or paste a key from cursor.com/dashboard"
 
 async function cursorFetch(input: Request | string | URL, init?: RequestInit): Promise<Response> {
   const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url
   if (url.includes("/chat/completions")) {
+    if (pastedApiKey === "") return errorResponse({ message: EMPTY_KEY, code: "invalid_api_key" }, 401)
     const problem = await checkKey()
     if (problem) return errorResponse(problem, 401)
     const body = JSON.parse(await bodyText(input, init))
@@ -109,7 +116,7 @@ export const CursorAuthPlugin: Plugin = async (input) => {
       provider: "cursor",
       loader: async (getAuth) => {
         const auth = await getAuth().catch(() => undefined)
-        if (auth && auth.type === "api" && auth.key !== "cursor-sdk-store") pastedApiKey = auth.key
+        pastedApiKey = auth?.type === "api" && auth.key !== "cursor-sdk-store" ? (auth.key ?? "").trim() : undefined
         return {
           apiKey: "cursor-managed",
           baseURL: BASE_URL,

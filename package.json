@@ -39,7 +39,8 @@
     "spike": "bun spike/validate-sdk.ts",
     "smoke": "bash scripts/fresh-home-smoke.sh",
     "prepublishOnly": "npm run build",
-    "test:cli": "npm run build && bash spike/cli-setup.test.sh"
+    "test:cli": "npm run build && bash spike/cli-setup.test.sh",
+    "test:plugin": "bun test spike/plugin.test.ts"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.36"
