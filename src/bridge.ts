@@ -16,15 +16,27 @@ import { homedir, tmpdir } from "node:os"
 import { join } from "node:path"
 import { markBlocked, resolveVariant } from "./models.js"
 
-// @cursor/sdk's internal logger writes "HH:MM:SS.mmm INFO ..." lines via
-// console.log unconditionally (no config/env to silence it, verified against
-// the esm bundle). Filter exactly those lines, pass everything else through.
-const SDK_LOG_LINE = /^\d{2}:\d{2}:\d{2}\.\d{3} (TRACE|DEBUG|INFO|WARN|ERROR)\s/
-const originalConsoleLog = console.log.bind(console)
-console.log = (...args: unknown[]) => {
-  if (typeof args[0] === "string" && SDK_LOG_LINE.test(args[0])) return
-  originalConsoleLog(...args)
+// @cursor/sdk has no log-level switch: it prints "HH:MM:SS.mmm INFO ..." through
+// whatever console.* is installed at call time, ANSI-coloured when stdout is a
+// TTY (the opencode TUI). Match after stripping colours; re-wrap per request so
+// a host that replaces console.* after plugin load cannot bypass the filter.
+const SDK_LOG_LINE = /^\d{2}:\d{2}:\d{2}\.\d{3} (TRACE|DEBUG|INFO|WARN)\s/
+const ANSI = /\x1b\[[0-9;]*m/g
+const QUIET = Symbol.for("opencode-cursor-auth.quiet")
+type ConsoleFn = ((...args: unknown[]) => void) & { [QUIET]?: true }
+export function ensureQuietConsole() {
+  for (const m of ["log", "info", "warn", "debug"] as const) {
+    const current = console[m] as ConsoleFn
+    if (current[QUIET]) continue
+    const wrapped: ConsoleFn = (...args) => {
+      if (typeof args[0] === "string" && SDK_LOG_LINE.test(args[0].replace(ANSI, ""))) return
+      current(...args)
+    }
+    wrapped[QUIET] = true
+    console[m] = wrapped
+  }
 }
+ensureQuietConsole()
 
 type ContentPart = { type: string; text?: string }
 type OaMessage = {
@@ -621,6 +633,7 @@ export function _stats() {
 
 export async function handleChatCompletion(body: OaBody, apiKey?: string, signal?: AbortSignal, scope?: string): Promise<Response> {
   if (signal?.aborted) throw new DOMException("aborted", "AbortError")
+  ensureQuietConsole()
   await loadSessions()
   const streaming = body.stream !== false
   const reply = deferred()
