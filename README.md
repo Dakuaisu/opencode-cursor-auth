@@ -85,6 +85,18 @@ opencode run -m cursor/auto "hello"
 
 Or pick any `cursor/*` model from the opencode model selector.
 
+## Upgrading
+
+```sh
+npx @vidit19sharma/opencode-cursor-auth update
+```
+
+Then restart opencode. opencode pins `@latest` to the version it first installed and never re-checks npm, so this deletes that cached copy and opencode installs the current release on next start. Tell-tale sign you need it: Ctrl+T shows no variants, or features from the changelog are missing. Manual equivalent:
+
+```sh
+rm -rf ~/.cache/opencode/packages/@vidit19sharma/opencode-cursor-auth@latest
+```
+
 ## Models
 
 ```sh

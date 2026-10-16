@@ -101,7 +101,13 @@ Optional: to see which models the account is actually allowed to use, clone the 
 
 ## Upgrading
 
-With `@latest` in the `plugin` array, restarting opencode picks up new versions. If it stays on an old version, clear the cached package and restart opencode:
+opencode resolves `@latest` once, at first install, and keeps that cached version forever; restarting does not upgrade it. To upgrade, run:
+
+```bash
+npx @vidit19sharma/opencode-cursor-auth update
+```
+
+Then tell the user to restart opencode; it installs the current release from npm on start. `update --dry-run` shows what would be removed. Manual equivalent (also delete any other `@vidit19sharma/opencode-cursor-auth@*` dir there, and under `~/.cache/opencode/npm/` on older opencode):
 
 ```bash
 rm -rf ~/.cache/opencode/packages/@vidit19sharma/opencode-cursor-auth@latest
@@ -118,6 +124,7 @@ The plugin is installed. Every model the user's Cursor plan includes is availabl
 - **403 `permission_error` "Model Blocked"**: a team admin disabled that model for the account. It is hidden from `opencode models` from then on; delete `~/.cache/opencode-cursor-auth/models.json` to re-check.
 - **400 `Cannot use this model`**: the model id is not in Cursor's catalog for this account.
 - **Request hangs with no error**: `opencode auth login` was never run for Cursor; run it (0.3.2+ seeds the entry automatically so you get a 401 message instead).
+- **Features missing / variants not showing on Ctrl+T**: opencode is running a stale cached version. Run `npx @vidit19sharma/opencode-cursor-auth update`, then restart opencode.
 - **Model list empty or only `cursor/auto`**: the catalog fetch failed (offline or not logged in). Fix auth, delete `~/.cache/opencode-cursor-auth/models.json`, restart opencode.
 
 ### Paths
