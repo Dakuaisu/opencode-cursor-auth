@@ -2,6 +2,20 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## Unreleased
+
+### Added
+
+- `npx @vidit19sharma/opencode-cursor-auth update` — removes opencode's cached copy of the plugin so the next opencode start installs the current release. opencode resolves `@latest` once at first install and never re-checks, so users were silently stuck on the version they first installed (`--dry-run` supported).
+- Mocked plugin unit tests (`bun run test:plugin`) covering key handling, expiry, headless login URL passthrough and auth-entry seeding.
+
+### Fixed
+
+- Pressing Esc before the first byte (during agent setup) returned HTTP 502 "aborted"; it now propagates as a proper abort.
+- `@cursor/sdk` INFO/WARN log lines leaked into the opencode TUI: the lines are ANSI-coloured when stdout is a TTY, so the filter never matched there. Colours are stripped before matching and the filter is re-asserted per request.
+- An empty or whitespace API key stored via the paste method silently fell back to the SDK key store; it now returns 401 `invalid_api_key`.
+- A failure after content has already streamed emits a single SSE `error` frame and closes without `[DONE]` (covered by a test).
+
 ## 0.3.2 — 2026-10-16
 
 ### Added
