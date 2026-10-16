@@ -20,23 +20,9 @@ You should see `1.19` or newer. If older or missing, ask the user to install or 
 node --version
 ```
 
-You should see `v22.13` or newer. opencode installs plugins with Bun, but `@cursor/sdk` spawns the `cursor-agent` binary and requires Node >= 22.13. If older, ask the user to upgrade Node.
+You should see `v22.13` or newer. `@cursor/sdk` requires Node >= 22.13. If older, ask the user to upgrade Node.
 
-### Check the Cursor CLI
-
-```bash
-cursor-agent --version
-```
-
-If this prints a version, continue. If it fails with `command not found`, install it:
-
-```bash
-curl https://cursor.com/install -fsS | bash
-```
-
-Then open a new shell, or add `~/.local/bin` to `PATH`, and re-run `cursor-agent --version`.
-
-A Cursor subscription (Pro, Business, or team) is required. `cursor-agent login` is not required (the plugin has its own login) but is harmless.
+A Cursor subscription (Pro, Business, or team) is required.
 
 ## Installation
 
@@ -123,9 +109,8 @@ The plugin is installed. Every model the user's Cursor plan includes is availabl
 - **401 `Cursor SDK key missing/expired`**: run `opencode auth login`.
 - **403 `permission_error` "Model Blocked"**: a team admin disabled that model for the account. It is hidden from `opencode models` from then on; delete `~/.cache/opencode-cursor-auth/models.json` to re-check.
 - **400 `Cannot use this model`**: the model id is not in Cursor's catalog for this account.
-- **`cursor-agent: command not found` at request time**: install the Cursor CLI (see Prerequisites) and make sure it is on `PATH` for the shell that launches opencode.
+- **Request hangs with no error**: `opencode auth login` was never run for Cursor; run it (0.3.2+ seeds the entry automatically so you get a 401 message instead).
 - **Model list empty or only `cursor/auto`**: the catalog fetch failed (offline or not logged in). Fix auth, delete `~/.cache/opencode-cursor-auth/models.json`, restart opencode.
-- **Stray `cursor-agent` processes**: check with `pgrep -fl cursor-agent`. A single `worker-server` is the SDK's idle singleton and is normal.
 
 ### Paths
 

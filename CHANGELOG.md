@@ -2,6 +2,16 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## 0.3.2 — 2026-10-16
+
+### Fixed
+
+- The first request before `opencode auth login` hung in opencode's connect loop: without a `cursor` auth entry opencode skips the plugin's auth loader and dials the dummy `http://cursor.local/v1`. The plugin now seeds its auth entry (only when none exists), so the loader runs and returns a clear 401 telling you to run `opencode auth login`.
+
+### Changed
+
+- Docs no longer claim the Cursor CLI (`cursor-agent`) is required; `@cursor/sdk` talks to Cursor's backend directly.
+
 ## 0.3.1 — 2026-10-16
 
 ### Fixed

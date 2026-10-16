@@ -1,7 +1,10 @@
-import type { Plugin } from "@opencode-ai/plugin"
+import type { Plugin, PluginInput } from "@opencode-ai/plugin"
 import { Cursor, type SdkAuthStatus } from "@cursor/sdk"
 import { errorResponse, handleChatCompletion } from "./bridge.js"
 import { currentModels } from "./models.js"
+import { readFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import { join } from "node:path"
 export { parseContext } from "./models.js"
 
 const BASE_URL = "http://cursor.local/v1"
@@ -71,7 +74,16 @@ async function cursorFetch(input: Request | string | URL, init?: RequestInit): P
   return Response.json({ error: { message: `unsupported endpoint: ${url}` } }, { status: 404 })
 }
 
-export const CursorAuthPlugin: Plugin = async () => {
+async function seedAuthEntry(client: PluginInput["client"] | undefined): Promise<void> {
+  if (!client?.auth?.set) return
+  const file = join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "opencode", "auth.json")
+  const entries = await readFile(file, "utf8").then(JSON.parse, (err: NodeJS.ErrnoException) => (err.code === "ENOENT" ? {} : undefined))
+  if (!entries || typeof entries !== "object" || "cursor" in entries) return
+  await client.auth.set({ path: { id: "cursor" }, body: { type: "api", key: "cursor-sdk-store" } })
+}
+
+export const CursorAuthPlugin: Plugin = async (input) => {
+  seedAuthEntry(input?.client).catch(() => {})
   return {
     config: async (config) => {
       const providers = (config.provider ??= {})

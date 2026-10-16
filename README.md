@@ -23,7 +23,6 @@ The plugin bridges opencode's OpenAI-style chat requests to the official [`@curs
 ## Requirements
 
 - Node >= 22.13 (opencode runs plugins on Bun, which also works)
-- [`cursor-agent` CLI](https://cursor.com/docs/cli) installed (`curl https://cursor.com/install -fsS | bash`) — the SDK's local executor uses it
 - A Cursor subscription
 
 ## Install
@@ -115,7 +114,7 @@ The models cache is refetched once on upgrade.
 ## How it works
 
 ```
-opencode ──(OpenAI chat JSON)──> plugin fetch() ──> @cursor/sdk Agent ──> cursor-agent ──> Cursor backend
+opencode ──(OpenAI chat JSON)──> plugin fetch() ──> @cursor/sdk Agent ──> Cursor backend
          <─(SSE stream)────────  bridge  <──(typed deltas: text / thinking / tool calls)
 ```
 
@@ -147,6 +146,7 @@ bun install
 bun run build        # tsc → dist/
 bun run test         # end-to-end bridge tests (requires Cursor login, uses real Cursor usage)
 bun run spike        # raw @cursor/sdk validation
+bun run smoke        # packs the plugin and loads it in a pristine HOME (startup, auth login, first request before login)
 ```
 
 The test suite runs 13 scenarios: plain streaming, a full tool loop on one held run, in-memory and disk-persisted session resume, AGENTS.md system-prompt delivery, mid-stream abort, error statuses, session scoping, context limits and key checks, model variants, the concurrency cap, retry semantics, and blocked models.
@@ -154,7 +154,6 @@ The test suite runs 13 scenarios: plain streaming, a full tool loop on one held 
 ## Known limitations
 
 - `systemPrompt` as a true harness replacement is feature-gated server-side by Cursor; system text is applied via `AGENTS.md` as a project rule (merged under Cursor's harness prompt).
-- The SDK spawns a `cursor-agent` worker per turn (~1–2 s startup on resume).
 - Cursor's catalog has no entitlement info, so models your plan or team blocks only disappear after the first 403.
 - `limit.context` is per model, not per variant: picking a smaller-context variant (e.g. gpt-5.5 `272k`) keeps the base model's 1M limit in opencode's context indicator and auto-compaction.
 - A run parked waiting for a tool result keeps its slot. Cursor-model sessions that spawn Cursor-model sub-agents nested deeper than `OPENCODE_CURSOR_MAX_ACTIVE` will stall; raise the limit if you fan out.
