@@ -4,7 +4,7 @@ CLI="$(cd "$(dirname "$0")/.." && pwd)/dist/cli.js"
 ROOT="$(mktemp -d "${TMPDIR:-/tmp}/cli-setup.XXXXXX")"
 trap 'rm -rf "$ROOT"' EXIT
 unset OPENCODE_CONFIG
-export HOME="$ROOT/home" XDG_CONFIG_HOME="$ROOT/xdg"
+export HOME="$ROOT/home" XDG_CONFIG_HOME="$ROOT/xdg" XDG_CACHE_HOME="$ROOT/xdg-cache"
 fails=0
 ok() { echo "PASS $1"; }
 bad() { echo "FAIL $1"; fails=$((fails + 1)); }
@@ -85,6 +85,38 @@ check "explicit file edited" 'grep -q "opencode-cursor-auth@latest" "$E"'
 check "default dir untouched" '[ ! -e "$OPENCODE_CONFIG_DIR" ]'
 OPENCODE_CONFIG="$ROOT/c7/env.json" run setup
 check "\$OPENCODE_CONFIG honoured" '[ $CODE -eq 0 ] && grep -q "opencode-cursor-auth@latest" "$ROOT/c7/env.json"'
+
+mkcache() { # $1 = cache root, $2 = layout dir (packages|npm), $3 = version
+  local D="$1/$2/@vidit19sharma/opencode-cursor-auth@latest"
+  mkdir -p "$D/node_modules/@vidit19sharma/opencode-cursor-auth"
+  printf '{"dependencies":{"@vidit19sharma/opencode-cursor-auth":"%s"}}' "$3" >"$D/package.json"
+  printf '{"name":"@vidit19sharma/opencode-cursor-auth","version":"%s"}' "$3" >"$D/node_modules/@vidit19sharma/opencode-cursor-auth/package.json"
+}
+
+echo "== 8. update, no cache dir -> nothing to update"
+export XDG_CACHE_HOME="$ROOT/u8/cache"
+run update
+check "exit 0" '[ $CODE -eq 0 ] && grep -q "nothing to update" <<<"$OUT"'
+check "cache not created" '[ ! -e "$XDG_CACHE_HOME" ]'
+
+echo "== 9. update with cached 0.1.0 + unrelated sibling"
+export XDG_CACHE_HOME="$ROOT/u9/cache"; C="$XDG_CACHE_HOME/opencode"
+mkcache "$C" packages 0.1.0
+D="$C/packages/@vidit19sharma/opencode-cursor-auth@latest"; S="$C/packages/opencode-claude-auth@latest"
+mkdir -p "$S"; printf '{}' >"$S/package.json"
+run update --dry-run
+check "dry-run exit 0 + message" '[ $CODE -eq 0 ] && grep -q "would remove cached 0.1.0" <<<"$OUT"'
+check "dry-run kept dir" '[ -d "$D" ]'
+run update
+check "exit 0 + removed + restart" '[ $CODE -eq 0 ] && grep -q "removed cached 0.1.0" <<<"$OUT" && grep -q "restart opencode" <<<"$OUT"'
+check "our dir gone" '[ ! -e "$D" ]'
+check "sibling kept" '[ -f "$S/package.json" ]'
+
+echo "== 10. update legacy npm/ layout"
+export XDG_CACHE_HOME="$ROOT/u10/cache"; C="$XDG_CACHE_HOME/opencode"
+mkcache "$C" npm 0.2.0
+run update
+check "exit 0 + removed legacy" '[ $CODE -eq 0 ] && grep -q "removed cached 0.2.0" <<<"$OUT" && [ ! -e "$C/npm/@vidit19sharma/opencode-cursor-auth@latest" ]'
 
 echo "== misc"
 run --help; check "--help exit 0" '[ $CODE -eq 0 ] && grep -q "Usage" <<<"$OUT"'
