@@ -161,6 +161,7 @@ bun install
 bun run build        # tsc → dist/
 bun run test         # end-to-end bridge tests (requires Cursor login, uses real Cursor usage)
 bun run spike        # raw @cursor/sdk validation
+bun run test:cli     # exercises the npx setup command against temp config dirs (7 cases)
 bun run smoke        # packs the plugin and loads it in a pristine HOME (startup, auth login, first request before login)
 ```
 
