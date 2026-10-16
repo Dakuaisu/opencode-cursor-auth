@@ -5,6 +5,9 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "bin": {
+    "opencode-cursor-auth": "dist/cli.js"
+  },
   "files": [
     "dist",
     "README.md",
@@ -31,11 +34,12 @@
     "auth"
   ],
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod +x dist/cli.js",
     "test": "bun spike/e2e-bridge.ts",
     "spike": "bun spike/validate-sdk.ts",
     "smoke": "bash scripts/fresh-home-smoke.sh",
-    "prepublishOnly": "tsc"
+    "prepublishOnly": "npm run build",
+    "test:cli": "npm run build && bash spike/cli-setup.test.sh"
   },
   "dependencies": {
     "@cursor/sdk": "^1.0.36"

@@ -1,0 +1,122 @@
+#!/usr/bin/env node
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs"
+import { homedir } from "node:os"
+import { dirname, join, resolve } from "node:path"
+import process from "node:process"
+
+const PKG = "@vidit19sharma/opencode-cursor-auth"
+const ENTRY = `${PKG}@latest`
+
+const HELP = `Usage: npx ${PKG} [setup] [--dry-run] [--config <path>]
+
+Adds "${ENTRY}" to the "plugin" array of your opencode config.
+Idempotent: does nothing if any ${PKG} entry is already present.
+
+  --dry-run        print what would change, write nothing
+  --config <path>  edit this file instead of the auto-detected one
+  --help           show this help
+
+Config lookup: --config, $OPENCODE_CONFIG, then opencode.jsonc / opencode.json in
+$OPENCODE_CONFIG_DIR, $XDG_CONFIG_HOME/opencode or ~/.config/opencode.
+
+Exit codes: 0 ok or already installed, 2 cannot edit safely (manual edit printed), 1 error.`
+
+const NEXT = `Next steps:
+  1. Restart opencode
+  2. opencode auth login -> Cursor -> Log in with Cursor (browser)
+  3. opencode models | grep cursor/`
+
+const MANUAL = `Add this to the top-level "plugin" array of your opencode config (create it if missing):
+  "plugin": ["${ENTRY}"]`
+
+// Strips // and /* */ comments and trailing commas outside double-quoted strings; does not handle single-quoted strings or other JSON5 syntax.
+const stripJsonc = (s: string) =>
+  s
+    .replace(/("(?:\\.|[^"\\])*")|\/\/[^\n]*|\/\*[\s\S]*?\*\//g, (_m, str) => str ?? "")
+    .replace(/("(?:\\.|[^"\\])*")|,(\s*[}\]])/g, (_m, str, close) => str ?? close)
+
+function tryParse(s: string): unknown {
+  try {
+    return JSON.parse(s)
+  } catch {
+    return undefined
+  }
+}
+
+function main(argv: string[]): number {
+  let dryRun = false
+  let explicit: string | undefined
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i]
+    if (a === "--help" || a === "-h") return console.log(HELP), 0
+    else if (a === "--dry-run") dryRun = true
+    else if (a === "--config") explicit = argv[++i]
+    else if (a !== "setup") return console.error(`Unknown argument: ${a}\n\n${HELP}`), 1
+  }
+  if (argv.includes("--config") && !explicit) return console.error("--config needs a path"), 1
+
+  const env = process.env
+  const dir = env.OPENCODE_CONFIG_DIR || join(env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode")
+  const file = resolve(
+    explicit ||
+      env.OPENCODE_CONFIG ||
+      ["opencode.jsonc", "opencode.json"].map((f) => join(dir, f)).find((f) => existsSync(f)) ||
+      join(dir, "opencode.json"),
+  )
+
+  const exists = existsSync(file)
+  const original = exists ? readFileSync(file, "utf8") : ""
+  const strict = exists ? tryParse(original) : { $schema: "https://opencode.ai/config.json" }
+  const config = (strict ?? tryParse(stripJsonc(original))) as Record<string, unknown> | undefined
+  console.log(`Config: ${file}${exists ? "" : " (will be created)"}`)
+
+  if (!config || typeof config !== "object" || Array.isArray(config)) {
+    console.error(`Cannot parse ${file}; not editing it.\n${MANUAL}`)
+    return 2
+  }
+
+  const leftovers: string[] = []
+  const provider = config.provider as Record<string, unknown> | undefined
+  if (provider && typeof provider === "object" && "cursor-acp" in provider)
+    leftovers.push(`  - remove the "cursor-acp" block under "provider" in ${file}`)
+  const acp = join(dir, "plugin", "cursor-acp.js")
+  if (existsSync(acp)) leftovers.push(`  - rm ${JSON.stringify(acp)}`)
+  if (leftovers.length)
+    console.log(
+      `Notice: old open-cursor setup found (nothing was deleted). To remove it:\n${leftovers.join("\n")}\n  - npm uninstall -g @rama_nigg/open-cursor`,
+    )
+
+  const plugins = config.plugin ?? []
+  if (!Array.isArray(plugins)) {
+    console.error(`"plugin" in ${file} is not an array; not editing it.\n${MANUAL}`)
+    return 2
+  }
+  if (plugins.some((p) => typeof p === "string" && p.startsWith(PKG))) {
+    console.log(`Already installed: ${PKG} is in "plugin". File left untouched.\n\n${NEXT}`)
+    return 0
+  }
+  if (strict === undefined) {
+    console.error(`${file} has comments or trailing commas; not rewriting it (that would drop them).\n${MANUAL}`)
+    return 2
+  }
+
+  config.plugin = [...plugins, ENTRY]
+  const next = JSON.stringify(config, null, 2) + "\n"
+  if (dryRun) {
+    console.log(`Dry run: would ${exists ? "update" : "create"} ${file} with:\n${next}`)
+    return 0
+  }
+  mkdirSync(dirname(file), { recursive: true })
+  if (exists) writeFileSync(`${file}.bak-cursor-auth`, original)
+  writeFileSync(`${file}.tmp`, next)
+  renameSync(`${file}.tmp`, file)
+  console.log(`Added "${ENTRY}" to "plugin"${exists ? ` (backup: ${file}.bak-cursor-auth)` : ""}.\n\n${NEXT}`)
+  return 0
+}
+
+try {
+  process.exitCode = main(process.argv.slice(2))
+} catch (e) {
+  console.error(`Unexpected error: ${e instanceof Error ? e.message : e}`)
+  process.exitCode = 1
+}

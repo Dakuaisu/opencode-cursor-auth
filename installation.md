@@ -38,7 +38,15 @@ Skip this step if none of these exist.
 
 ### Step 2: Add the plugin to the opencode config
 
-The config file is `~/.config/opencode/opencode.json`. Some users have `~/.config/opencode/opencode.jsonc` instead; edit whichever exists.
+**Preferred, if you can run shell commands:**
+
+```bash
+npx @vidit19sharma/opencode-cursor-auth setup
+```
+
+It adds the plugin idempotently (exit 0 = added or already present) and lists any open-cursor leftovers from Step 1 without deleting them. Exit 2 means it could not edit the file safely (e.g. a `.jsonc` with comments); it prints the exact edit, which you then make by hand as described below. Use `--dry-run` to preview.
+
+**Fallback: edit the file by hand.** The config file is `~/.config/opencode/opencode.json`. Some users have `~/.config/opencode/opencode.jsonc` instead; edit whichever exists.
 
 If neither exists, create `~/.config/opencode/opencode.json`:
 

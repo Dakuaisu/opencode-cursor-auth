@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## 0.3.2 — 2026-10-16
 
+### Added
+
+- `npx @vidit19sharma/opencode-cursor-auth setup` — adds the plugin to opencode config idempotently (`--dry-run`, `--config`).
+
 ### Fixed
 
 - The first request before `opencode auth login` hung in opencode's connect loop: without a `cursor` auth entry opencode skips the plugin's auth loader and dials the dummy `http://cursor.local/v1`. The plugin now seeds its auth entry (only when none exists), so the loader runs and returns a clear 401 telling you to run `opencode auth login`.
