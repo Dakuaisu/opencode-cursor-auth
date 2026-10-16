@@ -95,6 +95,8 @@ opencode models | grep cursor/
 
 You should see `cursor/auto`, `cursor/gpt-5.5`, `cursor/claude-opus-5-5`, and more. The first run fetches the catalog from Cursor (about 3 s); it is cached for 24 h at `~/.cache/opencode-cursor-auth/models.json`.
 
+Variants are not separate ids. In the TUI, press Ctrl+T on a cursor model to pick its effort, thinking, fast, or context variant.
+
 ```bash
 opencode run -m cursor/gpt-5.5 "Reply with exactly: CURSOR-AUTH-OK"
 ```

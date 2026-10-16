@@ -12,8 +12,8 @@ The plugin bridges opencode's OpenAI-style chat requests to the official [`@curs
 - **Thinking blocks** — Cursor reasoning streams into opencode as proper thinking blocks (`reasoning_content`)
 - **Session resume** — conversations map to native Cursor agents (`Agent.resume`), in-memory and persisted to disk for 7 days, scoped per opencode session so parallel sub-agents never share an agent
 - **System prompts** — delivered via `AGENTS.md` in a per-session workspace (the `--system-prompt` flag is server-gated by Cursor)
-- **Dynamic model list with variants** — fetched live from `Cursor.models.list()`, cached 24h; every reasoning-effort / fast / 1M-context variant is its own model id
-- **Context limits** — each model publishes its Cursor context window, so opencode's auto-compaction and context indicator work
+- **Dynamic model list with variants** — fetched live from `Cursor.models.list()`, cached 24h; one id per model, with every reasoning-effort / thinking / fast / context variant on opencode's Ctrl+T variant picker
+- **Context limits** — each model publishes the context window of Cursor's default variant, so opencode's auto-compaction and context indicator work
 - **Real error statuses** — 400 / 401 / 403 / 429 / 502 instead of a 200 stream carrying an error
 - **Cancellation** — Esc or a sub-agent timeout cancels the Cursor run and closes the agent
 - **Concurrency cap and retry** — at most 4 Cursor runs at once (configurable); transient failures retried before the first byte
@@ -77,15 +77,27 @@ Or pick any `cursor/*` model from the opencode model selector.
 opencode models | grep cursor/
 ```
 
-- **Base ids** (`cursor/gpt-5.5`) send no parameters, so Cursor applies its own defaults. Cursor's `default` model is exposed as `cursor/auto`.
-- **Variant ids** are the base id plus every non-default parameter value, in Cursor's parameter order. Boolean parameters use the parameter name. Examples: `cursor/gpt-5.5-low`, `cursor/gpt-5.5-high-fast`, `cursor/gpt-5.5-1m-extra-high`, `cursor/claude-opus-5-5-1m-max`.
-- The full catalog is currently about 485 ids from 47 models.
-- **Limits**: `limit.context` is the variant's context value, else the model's first listed context value, else 200k. `limit.output` is a fixed 32k accounting reserve (Cursor publishes no output cap and the bridge sends no `max_tokens`). Limits you set yourself in opencode config are kept.
-- **Unknown ids** are passed through to Cursor, which answers with its own 400.
+- **Base ids only** — one id per Cursor model (47 today: `cursor/auto`, `cursor/gpt-5.5`, `cursor/claude-opus-5-5`, …). A base id is Cursor's own default variant (`isDefault`) and sends its params explicitly. Cursor's `default` model is exposed as `cursor/auto`.
+- **Variants** — every other Cursor variant (reasoning effort, thinking, fast, context size) is an opencode model variant. In the TUI, select the model and press **Ctrl+T** to cycle them. Models with no variants (e.g. `gemini-3.1-pro`) show "No variants available".
+- **Variant names** are the params that differ from Cursor's default, joined by `-`: values as-is (`low`, `xhigh`, `272k`), a boolean switched on is the param name (`fast`, `thinking`), switched off is `no-<param>` (`no-fast`, `no-thinking`). Examples: gpt-5.5 → `low`, `extra-high`, `272k-high-fast`; claude-opus-5 → `no-thinking`, `max-fast`; grok-4.7 → `256k-low-no-fast`.
+- **In config**, set `variant` next to `model`:
+
+  ```json
+  { "agent": { "build": { "model": "cursor/gpt-5.5", "variant": "low" } } }
+  ```
+
+- **Limits**: `limit.context` is the default variant's context value, else the model's first listed context value, else 200k (gpt-5.5 and claude-opus-5-5 → 1M). `limit.output` is a fixed 32k accounting reserve (Cursor publishes no output cap and the bridge sends no `max_tokens`). Limits you set yourself in opencode config are kept.
+- **Unknown ids** are passed through to Cursor, which answers with its own 400. An unknown variant param returns 400 `invalid_request_error` before any Cursor agent is created.
 - **Blocked models**: Cursor's catalog has no per-account entitlement info. If Cursor rejects a model as "Model Blocked" (e.g. a team admin disabled it), the request fails with 403 `permission_error` carrying Cursor's message, and that model and all its variants are hidden from the list. Using a hidden id explicitly still sends it to Cursor. Blocked flags persist across catalog refreshes; delete `~/.cache/opencode-cursor-auth/models.json` to re-check.
 - **Offline / logged out**: the stale cache is used if present, otherwise only `cursor/auto`.
 
-The catalog is cached at `~/.cache/opencode-cursor-auth/models.json`; delete it to force a refresh.
+The catalog is cached for 24h at `~/.cache/opencode-cursor-auth/models.json`; delete it to force a refresh.
+
+### Migrating from 0.2.0
+
+The suffixed ids (`cursor/gpt-5.5-low`, `cursor/claude-opus-5-5-1m-max`, …) no longer exist; Cursor rejects them with 400 "Cannot use this model".
+Replace each with the base model plus a variant: `cursor/gpt-5.5-low` → `"model": "cursor/gpt-5.5", "variant": "low"`.
+The models cache is refetched once on upgrade.
 
 ## Configuration
 
@@ -111,7 +123,7 @@ opencode ──(OpenAI chat JSON)──> plugin fetch() ──> @cursor/sdk Agen
 - Each opencode tool is registered as a Cursor **custom tool** whose `execute()` parks a promise, emits an OpenAI `tool_calls` chunk, and resumes the *same* Cursor run when opencode sends the tool result back.
 - Conversation prefixes, plus the opencode session id (sent via the `chat.headers` hook), are hashed → mapped to Cursor agent IDs, so follow-up turns use `Agent.resume` instead of replaying history. The map persists at `~/.cache/opencode-cursor-auth/sessions.json`.
 - System messages are written to `AGENTS.md` in a per-session temp workspace and loaded via Cursor's project rules (`settingSources: ["project"]`). Workspaces are removed once no session references them.
-- Variant ids are mapped back to Cursor `ModelSelection` params (`{ id, params }`).
+- The selected variant reaches the plugin as `providerOptions.cursor`; `@ai-sdk/openai-compatible` puts it in the request body as top-level `cursor_params: [{ id, value }, …]`, which the bridge validates and maps to Cursor `ModelSelection.params`.
 - New turns take a slot from a FIFO semaphore (`OPENCODE_CURSOR_MAX_ACTIVE`); tool-result continuations reuse their run's slot. `Agent.create` / `Agent.resume` / `send` are attempted up to 3 times with jittered exponential backoff on 429, 5xx, and network errors, never after the first byte.
 - The HTTP reply opens on the first text or thinking delta, so failures before any content become real HTTP errors.
 - The request's abort signal and stream cancel cancel the Cursor run, close the agent, and release its slot.
@@ -120,7 +132,7 @@ opencode ──(OpenAI chat JSON)──> plugin fetch() ──> @cursor/sdk Agen
 
 | Status | When |
 | --- | --- |
-| 400 | Unknown model or bad argument (Cursor's message); also an expired tool-call continuation |
+| 400 | Unknown model or bad argument (Cursor's message), unknown variant param; also an expired tool-call continuation |
 | 401 | SDK key missing/expired, or Cursor rejects the key |
 | 403 | Model blocked for your account (`permission_error`) |
 | 429 | Cursor rate limit |
@@ -143,7 +155,8 @@ The test suite runs 13 scenarios: plain streaming, a full tool loop on one held 
 
 - `systemPrompt` as a true harness replacement is feature-gated server-side by Cursor; system text is applied via `AGENTS.md` as a project rule (merged under Cursor's harness prompt).
 - The SDK spawns a `cursor-agent` worker per turn (~1–2 s startup on resume).
-- The model list is Cursor's full catalog (~485 ids). It has no entitlement info, so models your plan or team blocks only disappear after the first 403.
+- Cursor's catalog has no entitlement info, so models your plan or team blocks only disappear after the first 403.
+- `limit.context` is per model, not per variant: picking a smaller-context variant (e.g. gpt-5.5 `272k`) keeps the base model's 1M limit in opencode's context indicator and auto-compaction.
 - A run parked waiting for a tool result keeps its slot. Cursor-model sessions that spawn Cursor-model sub-agents nested deeper than `OPENCODE_CURSOR_MAX_ACTIVE` will stall; raise the limit if you fan out.
 - Usage/rate limits are whatever your Cursor plan enforces — the plugin adds none beyond the concurrency cap.
 

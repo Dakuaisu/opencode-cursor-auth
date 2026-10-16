@@ -2,11 +2,28 @@
 
 All notable changes to this project are documented here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## Unreleased
+## 0.3.0 — 2026-10-16
 
-- Model variants moved to opencode's native variant picker (Ctrl+T): only the 47 base ids are published, and each Cursor variant (e.g. `low`, `272k-none`, `no-thinking`, `fast`) is an opencode `variants` entry sent as `cursor_params` in the request body. Unknown variant params return 400.
-- The base id now uses Cursor's real default variant (`isDefault`) and sends its params explicitly; previously it implied the first-listed param values (e.g. `gpt-5.5` is now 1M context / medium reasoning, was 272k).
-- **Breaking:** suffixed variant ids like `cursor/gpt-5.5-low-fast` are removed; pick the base model and choose the variant with Ctrl+T. Models cache bumped to v4 (refetched once).
+### Breaking
+
+- The suffixed variant ids from 0.2.0 (`cursor/gpt-5.5-low`, `cursor/claude-opus-5-5-1m-max`, …) no longer exist; Cursor rejects them with 400 "Cannot use this model". Migrate `cursor/gpt-5.5-low` to model `cursor/gpt-5.5` + variant `low` (Ctrl+T in the TUI, or `variant:` in config).
+
+### Added
+
+- Cursor variants on opencode's native variant picker (Ctrl+T): the model list is the 47 base ids only, and every other Cursor variant is attached as an opencode model variant, named by the params that differ from Cursor's default (e.g. `low`, `272k-none`, `no-thinking`, `xhigh-fast`).
+- Variants are selectable in config with `variant: "<name>"` next to `model` in an agent entry.
+- `installation.md`: step-by-step install guide for AI coding agents (prerequisites, config edit, auth, verification, troubleshooting), shipped in the npm tarball; the README has a one-line prompt to hand to any LLM agent.
+- `spike/probe-models.ts`: probes every base model once and reports AVAILABLE / BLOCKED / OTHER for the logged-in account.
+
+### Changed
+
+- A base id now means Cursor's own default variant (`isDefault`), sends its params explicitly, and gets that variant's context limit; previously it implied the first-listed param values and under-reported context (`gpt-5.5`: 272k → 1M).
+- Models cache bumped to v4 `{name, context, params, variants, allowed}`; older cache files are refetched once.
+
+### Fixed
+
+- Blocked-model flags learned from 403s persist across the 24h catalog refresh (carried over by base id), so admin-blocked models stay hidden instead of reappearing; delete `models.json` to re-check.
+- An unknown variant param id or value (sent as `cursor_params`) returns 400 `invalid_request_error` before any Cursor agent is created or concurrency slot taken.
 
 ## 0.2.0 — 2026-10-16
 
