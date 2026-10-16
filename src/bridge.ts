@@ -102,6 +102,7 @@ function errorBody(err: unknown, status = statusFor(err)): ErrorBody {
 }
 
 const abortError = () => new DOMException("aborted", "AbortError")
+const isAbort = (err: unknown) => (err as { name?: unknown } | null)?.name === "AbortError"
 
 export function isTransient(err: unknown): boolean {
   const e = (typeof err === "object" && err !== null ? err : {}) as { message?: unknown; code?: unknown; status?: unknown; name?: unknown }
@@ -119,7 +120,8 @@ export async function withRetry<T>(fn: () => Promise<T>, signal?: AbortSignal, b
     try {
       return await fn()
     } catch (err) {
-      if (attempt >= 2 || signal?.aborted || !retryable(err)) throw err
+      if (signal?.aborted || isAbort(err)) throw abortError()
+      if (attempt >= 2 || !retryable(err)) throw err
       const delay = Math.min(baseDelayMs * 2 ** attempt * (0.75 + Math.random() * 0.5), 30_000)
       await new Promise((r) => {
         const t = setTimeout(r, delay)
@@ -500,6 +502,8 @@ function attachSignal(held: Held, signal: AbortSignal | undefined) {
   held.detachSignal?.()
   held.detachSignal = null
   if (!signal) return
+  // listeners never fire on an already-aborted signal (abort during Agent.create/resume)
+  if (signal.aborted) return abortHeld(held)
   const onAbort = () => abortHeld(held)
   signal.addEventListener("abort", onAbort, { once: true })
   held.detachSignal = () => signal.removeEventListener("abort", onAbort)
@@ -524,7 +528,9 @@ function teardownHeld(held: Held) {
 }
 
 function failHeld(held: Held, err: unknown) {
+  if (isAbort(err)) return abortHeld(held)
   teardownHeld(held)
+  held.run?.cancel().catch(() => {})
   if (statusFor(err) === 403) markBlocked(held.model)
   if (held.response && !held.opened) {
     held.opened = true
@@ -597,6 +603,11 @@ export function _resetForTest() {
   sessionsLoaded = false
 }
 
+let failAfterFirstDelta: string | null = null
+export function _failAfterFirstDelta(message: string | null) {
+  failAfterFirstDelta = message
+}
+
 export function _stats() {
   return {
     held: heldByAgent.size,
@@ -635,6 +646,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     held.response = sse?.response ?? null
     held.opened = false
     attachSignal(held, signal)
+    if (held.done) return reply.promise
     attachSink(held, sink)
     for (const m of body.messages) {
       if (m.role !== "tool" || !m.tool_call_id) continue
@@ -684,7 +696,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     } catch (err) {
       releaseSlot()
       releaseCwd(cwd)
-      if (signal?.aborted) throw abortError()
+      if (signal?.aborted || isAbort(err)) throw abortError()
       return errorResponse(err)
     }
   }
@@ -714,6 +726,7 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
   const self = held
   heldByAgent.set(agent.agentId, held)
   attachSignal(held, signal)
+  if (held.done) return reply.promise
   attachSink(held, sink)
 
   const customTools: Record<string, unknown> = {}
@@ -731,7 +744,10 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
     }
   }
 
-  await syncAgentsMd(cwd!, body.messages)
+  await syncAgentsMd(cwd!, body.messages).catch((err) => {
+    if (!self.done) throw err
+  })
+  if (self.done) return reply.promise
   const prompt =
     newSuffix
       .filter((m) => m.role !== "system")
@@ -748,6 +764,11 @@ export async function handleChatCompletion(body: OaBody, apiKey?: string, signal
           openReply(self)
           self.textAcc += update.text
           emit(self, "text", update.text)
+          if (failAfterFirstDelta !== null) {
+            const message = failAfterFirstDelta
+            failAfterFirstDelta = null
+            failHeld(self, new Error(message))
+          }
         } else if (update.type === "thinking-delta" && update.text) {
           openReply(self)
           emit(self, "reasoning", update.text)

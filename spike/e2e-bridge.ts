@@ -3,7 +3,7 @@
  * Test 1: plain streaming chat. Test 2: tool loop (request -> tool_calls ->
  * follow-up request with tool result -> final answer on the SAME cursor run).
  */
-import { _resetForTest, _setMaxActive, _stats, handleChatCompletion, isTransient, withRetry } from "../src/bridge.js";
+import { _failAfterFirstDelta, _resetForTest, _setMaxActive, _stats, handleChatCompletion, isTransient, withRetry } from "../src/bridge.js";
 import { currentModels, resolveModel, resolveVariant } from "../src/models.js";
 import { rmSync } from "node:fs";
 import { homedir } from "node:os";
@@ -330,6 +330,91 @@ if (res13.status === 200) {
   if (leaked.length) throw new Error(`Test 13 FAILED: blocked model still listed: ${leaked.slice(0, 3)}`);
   if (!resolveModel(blockedId)) throw new Error("Test 13 FAILED: blocked model must still resolve for explicit use");
 }
+
+const strayProcs = () =>
+  new TextDecoder()
+    .decode(Bun.spawnSync(["pgrep", "-fl", "cursor-agent"]).stdout)
+    .split("\n")
+    .filter((l) => l && !l.includes("worker-server"));
+
+async function assertClean(label: string) {
+  await new Promise((r) => setTimeout(r, 1500));
+  const st = _stats();
+  const procs = strayProcs();
+  console.log("stats:", JSON.stringify(st), "| cursor-agent procs (non worker-server):", procs.length ? procs : "none");
+  if (st.active !== 0 || st.held !== 0 || st.waiting !== 0) throw new Error(`${label} FAILED: leaked slot/held/waiter`);
+  if (procs.length) throw new Error(`${label} FAILED: stray cursor-agent process`);
+}
+
+async function assertBridgeOk(label: string) {
+  const r = await handleChatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "Reply with exactly: BRIDGE-OK" }] as never, stream: true });
+  const raw = await r.text();
+  const out = await readSse(new Response(raw));
+  console.log("follow-up status:", r.status, "| content:", JSON.stringify(out.content), "| [DONE]:", raw.includes("data: [DONE]"));
+  if (r.status !== 200 || !out.content.includes("BRIDGE-OK") || !raw.includes("data: [DONE]")) throw new Error(`${label} FAILED: bridge unusable afterwards`);
+}
+
+// --- Test 14: abort before first byte -> AbortError, not 502 ---
+console.log("\n=== Test 14: abort before first byte ===");
+for (const ms of [15, 400]) {
+  const ac14 = new AbortController();
+  const p14 = handleChatCompletion(
+    { model: "gpt-5.5", messages: [{ role: "user", content: "Count slowly from 1 to 200." }] as never },
+    undefined,
+    ac14.signal,
+    "ses_test_abort_pre",
+  );
+  setTimeout(() => ac14.abort(), ms);
+  const t14 = Date.now();
+  try {
+    const r14 = await p14;
+    if (ms === 15) throw new Error(`Test 14 FAILED: resolved with status ${r14.status}: ${(await r14.text()).slice(0, 200)}`);
+    if (r14.status !== 200) throw new Error(`Test 14 FAILED (${ms}ms): resolved with status ${r14.status}: ${(await r14.text()).slice(0, 200)}`);
+    await Promise.race([r14.text(), new Promise((_, rej) => setTimeout(() => rej(new Error(`Test 14 FAILED (${ms}ms): stream did not end within 5s`)), 5000))]);
+    console.log(`abort@${ms}ms: first byte won -> stream ended after`, Date.now() - t14, "ms");
+  } catch (err) {
+    if ((err as Error)?.message?.startsWith("Test 14 FAILED")) throw err;
+    console.log(`abort@${ms}ms: rejected with`, (err as Error)?.name, "after", Date.now() - t14, "ms");
+    if ((err as Error)?.name !== "AbortError") throw new Error(`Test 14 FAILED: expected AbortError, got ${err}`);
+  }
+  await assertClean("Test 14");
+}
+await assertBridgeOk("Test 14");
+
+// --- Test 15: mid-stream failure -> SSE error frame, no [DONE] ---
+console.log("\n=== Test 15: mid-stream failure emits error frame ===");
+_failAfterFirstDelta("injected failure");
+const res15 = await handleChatCompletion({ model: "gpt-5.5", messages: [{ role: "user", content: "Write three short sentences about the sea." }] as never, stream: true });
+if (res15.status !== 200) throw new Error(`Test 15 FAILED: status ${res15.status}`);
+const reader15 = res15.body!.getReader();
+const dec15 = new TextDecoder();
+let raw15 = "";
+let errorAt = 0;
+await Promise.race([
+  (async () => {
+    for (;;) {
+      const { done, value } = await reader15.read();
+      if (done) return;
+      raw15 += dec15.decode(value, { stream: true });
+      if (!errorAt && raw15.includes('"error"')) errorAt = Date.now();
+    }
+  })(),
+  new Promise((_, rej) => setTimeout(() => rej(new Error("Test 15 FAILED: stream did not end within 60s")), 60_000)),
+]);
+const endedAfterError = errorAt ? Date.now() - errorAt : -1;
+const frames15 = raw15.split("\n").filter((l) => l.startsWith("data: "));
+const errFrames = frames15.filter((l) => l !== "data: [DONE]" && JSON.parse(l.slice(6)).error);
+const errIdx = frames15.indexOf(errFrames[0]);
+const contentBefore = frames15.slice(0, errIdx).some((l) => JSON.parse(l.slice(6)).choices?.[0]?.delta?.content);
+console.log("frames:", frames15.length, "| error frame:", errFrames[0], "| content before:", contentBefore, "| ended", endedAfterError, "ms after error");
+if (!contentBefore) throw new Error("Test 15 FAILED: no content delta before error");
+if (errFrames.length !== 1) throw new Error(`Test 15 FAILED: expected exactly 1 error frame, got ${errFrames.length}`);
+const err15 = JSON.parse(errFrames[0].slice(6)).error;
+if (!String(err15.message).includes("injected failure") || typeof err15.type !== "string") throw new Error(`Test 15 FAILED: bad error frame ${errFrames[0]}`);
+if (raw15.includes("data: [DONE]")) throw new Error("Test 15 FAILED: [DONE] after error");
+if (endedAfterError < 0 || endedAfterError > 5000) throw new Error(`Test 15 FAILED: stream ended ${endedAfterError}ms after error`);
+await assertClean("Test 15");
+await assertBridgeOk("Test 15");
 
 console.log("\nALL BRIDGE TESTS PASSED");
 process.exit(0);
